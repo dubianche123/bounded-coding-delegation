@@ -11,6 +11,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import subprocess
 import sys
@@ -72,6 +73,8 @@ DEFAULT_GEMINI_REVIEW_MODEL = "gemini-3.1-flash-lite-preview"
 DEFAULT_GEMINI_FINAL_REVIEW_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_WORKSPACE_MODE = "direct"
 DEFAULT_QUALITY_MODE = "auto"
+DEFAULT_STDOUT_MODE = "brief"
+HANDOFF_SECTIONS = ("brief", "findings", "tests", "changed_files", "attempts", "logs", "full")
 
 ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 ACTIVE_PROCESSES_LOCK = threading.RLock()
@@ -94,6 +97,7 @@ class DelegateRequest:
     review: str = "always"
     max_fixup_rounds: int = 2
     check_health: bool = False
+    stdout_mode: str = DEFAULT_STDOUT_MODE
     workspace: str | None = None
     workspace_mode: str = DEFAULT_WORKSPACE_MODE
 
@@ -999,6 +1003,7 @@ def normalize_request(args: argparse.Namespace) -> DelegateRequest:
     requested_quality_mode = str(pick("quality_mode", DEFAULT_QUALITY_MODE))
     quality_mode = resolve_quality_mode(requested_quality_mode, str(task))
     review = pick("review", default_review_policy_for_quality_mode(quality_mode))
+    stdout_mode = str(pick("stdout_mode", DEFAULT_STDOUT_MODE))
     max_fixup_rounds_value = pick("max_fixup_rounds", None)
     max_fixup_rounds = (
         default_fixup_rounds_for_quality_mode(quality_mode)
@@ -1012,6 +1017,8 @@ def normalize_request(args: argparse.Namespace) -> DelegateRequest:
         raise ValueError("mode must be one of: plan, implement, review")
     if review not in {"auto", "always", "never"}:
         raise ValueError("review must be one of: auto, always, never")
+    if stdout_mode not in {"brief", "summary", "full"}:
+        raise ValueError("stdout_mode must be one of: brief, summary, full")
     if quality_mode not in {"fast", "safe"}:
         raise ValueError("quality_mode must resolve to one of: fast, safe")
     if max_fixup_rounds < 0:
@@ -1033,6 +1040,7 @@ def normalize_request(args: argparse.Namespace) -> DelegateRequest:
         review=review,
         max_fixup_rounds=max_fixup_rounds,
         check_health=check_health,
+        stdout_mode=stdout_mode,
         workspace=pick("workspace"),
         workspace_mode=workspace_mode,
     )
@@ -1724,6 +1732,162 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def compact_review_feedback(text: str | None, limit: int = 1200) -> str | None:
+    if not text:
+        return None
+    normalized = " ".join(text.strip().split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "... [truncated; read the full handoff for complete feedback]"
+
+
+def handoff_object(payload: dict[str, Any]) -> dict[str, Any]:
+    handoff = payload.get("handoff")
+    return handoff if isinstance(handoff, dict) else payload
+
+
+def handoff_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    handoff = handoff_object(payload)
+    metadata = handoff.get("metadata", {})
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def detail_command(handoff_path: Path | str, section: str) -> str:
+    script_path = Path(__file__).resolve()
+    return (
+        f"python3 -B {shlex.quote(str(script_path))} "
+        f"--read-handoff {shlex.quote(str(handoff_path))} --section {shlex.quote(section)}"
+    )
+
+
+def build_orchestrator_brief(
+    summary: dict[str, Any],
+    handoff: dict[str, Any],
+    handoff_path: Path,
+    summary_path: Path,
+    brief_path: Path,
+) -> dict[str, Any]:
+    metadata = handoff_metadata(handoff)
+    review_findings = metadata.get("review_findings") or []
+    step_review_findings = metadata.get("step_review_findings") or []
+    changed_files = metadata.get("changed_files") or []
+    test_results = metadata.get("test_results") or []
+    success = summary.get("success")
+    if success is None:
+        success = handoff.get("handoff_status") == "passed"
+    return {
+        "success": bool(success),
+        "handoff_status": handoff.get("handoff_status"),
+        "followup_required": bool(metadata.get("followup_required", summary.get("followup_required", False))),
+        "next_recommended_action": metadata.get("next_recommended_action") or summary.get("next_recommended_action"),
+        "summary": handoff.get("summary"),
+        "counts": {
+            "changed_files": len(changed_files) if isinstance(changed_files, list) else 0,
+            "tests": len(test_results) if isinstance(test_results, list) else 0,
+            "review_findings": len(review_findings) if isinstance(review_findings, list) else 0,
+            "step_review_findings": len(step_review_findings) if isinstance(step_review_findings, list) else 0,
+            "attempts": metadata.get("attempt_count"),
+        },
+        "paths": {
+            "handoff": str(handoff_path),
+            "summary": str(summary_path),
+            "brief": str(brief_path),
+            "log_dir": metadata.get("log_dir") or summary.get("log_dir"),
+        },
+        "available_sections": list(HANDOFF_SECTIONS),
+        "detail_commands": {
+            section: detail_command(handoff_path, section)
+            for section in HANDOFF_SECTIONS
+            if section != "brief"
+        },
+    }
+
+
+def build_stdout_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    brief = summary.get("orchestrator_brief", {})
+    counts = brief.get("counts", {}) if isinstance(brief, dict) else {}
+    return {
+        "success": summary.get("success"),
+        "executor": summary.get("executor"),
+        "mode": summary.get("mode"),
+        "quality_mode": summary.get("quality_mode"),
+        "review_policy": summary.get("review_policy"),
+        "review_performed": summary.get("review_performed"),
+        "followup_required": summary.get("followup_required"),
+        "handoff_status": summary.get("handoff_status"),
+        "models": summary.get("models"),
+        "counts": counts,
+        "tests_ran": summary.get("tests_ran"),
+        "tests_success": summary.get("tests_success"),
+        "attempt_count": summary.get("attempt_count"),
+        "fixup_rounds_used": summary.get("fixup_rounds_used"),
+        "warnings": summary.get("warnings", []),
+        "paths": {
+            "handoff": summary.get("handoff_path"),
+            "brief": summary.get("orchestrator_brief_path"),
+            "log_dir": summary.get("log_dir"),
+        },
+        "next_recommended_action": summary.get("next_recommended_action"),
+    }
+
+
+def build_handoff_section(payload: dict[str, Any], section: str) -> dict[str, Any]:
+    handoff = handoff_object(payload)
+    metadata = handoff_metadata(payload)
+    if section == "full":
+        return handoff
+    if section == "brief":
+        handoff_path = metadata.get("handoff_path") or payload.get("handoff_path") or ""
+        summary_path = str(Path(handoff_path).with_name("summary.json")) if handoff_path else ""
+        brief_path = str(Path(handoff_path).with_name("orchestrator_brief.json")) if handoff_path else ""
+        return build_orchestrator_brief(payload, handoff, Path(handoff_path), Path(summary_path), Path(brief_path))
+    if section == "findings":
+        return {
+            "handoff_status": handoff.get("handoff_status"),
+            "followup_required": metadata.get("followup_required"),
+            "review_findings": metadata.get("review_findings", []),
+            "step_review_findings": metadata.get("step_review_findings", []),
+            "review_feedback_excerpt": compact_review_feedback(metadata.get("review_feedback")),
+            "step_review_feedback_excerpt": compact_review_feedback(metadata.get("step_review_feedback")),
+            "next_recommended_action": metadata.get("next_recommended_action"),
+        }
+    if section == "tests":
+        return {
+            "tests_ran": metadata.get("tests_ran"),
+            "tests_success": metadata.get("tests_success"),
+            "test_results": metadata.get("test_results", []),
+        }
+    if section == "changed_files":
+        return {
+            "changed_files": metadata.get("changed_files", []),
+            "post_state": metadata.get("post_state"),
+        }
+    if section == "attempts":
+        return {
+            "attempt_count": metadata.get("attempt_count"),
+            "fixup_rounds_used": metadata.get("fixup_rounds_used"),
+            "max_fixup_rounds": metadata.get("max_fixup_rounds"),
+            "attempts": metadata.get("attempts", []),
+        }
+    if section == "logs":
+        return {
+            "log_dir": metadata.get("log_dir"),
+            "handoff_path": metadata.get("handoff_path"),
+            "cleanup_log": metadata.get("cleanup_log", []),
+            "workspace_path": metadata.get("workspace_path"),
+            "workspace_lock": metadata.get("workspace_lock"),
+        }
+    raise ValueError(f"Unknown handoff section: {section}")
+
+
+def read_handoff_section(handoff_path: str, section: str) -> int:
+    path = Path(handoff_path).expanduser().resolve()
+    payload = load_json_object(str(path))
+    result = build_handoff_section(payload, section)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
 def collect_changed_files(workspace: Path) -> list[dict]:
     result = run_command(
         ["git", "-C", str(workspace), "status", "--short", "--", ".", LOG_EXCLUDE_PATHSPEC],
@@ -1863,6 +2027,8 @@ def cleanup_generated_artifacts(workspace: Path) -> list[str]:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Delegate coding tasks to local Codex CLI or Gemini CLI.")
+    parser.add_argument("--read-handoff", help="Read a compact section from an existing handoff.json or summary.json and exit.")
+    parser.add_argument("--section", choices=HANDOFF_SECTIONS, default="brief", help="Section to read with --read-handoff. Default: brief.")
     parser.add_argument("--request-json", help="Hermes/Feishu request JSON file.")
     parser.add_argument("--repo", help="Repository or workspace path.")
     parser.add_argument("--task-file", help="Path to a file containing the user task.")
@@ -1878,6 +2044,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--review", choices=["auto", "always", "never"], help="Gemini review policy after implementation.")
     parser.add_argument("--max-fixup-rounds", type=int, help="Maximum automatic fixup rounds after step review findings. Default: 2.")
     parser.add_argument("--check-health", action="store_true", default=None, help="Print a workspace/process health snapshot and exit without delegating work.")
+    parser.add_argument("--stdout-mode", choices=["brief", "summary", "full"], help="What to print after a run. Default: brief.")
     parser.add_argument("--workspace-mode", choices=["direct", "worktree", "copy"], default=DEFAULT_WORKSPACE_MODE, help="Workspace handling mode. Default: direct.")
     parser.add_argument("--workspace", help="Exact isolated workspace/worktree path under /tmp. Must not already exist.")
     return parser.parse_args(argv)
@@ -1909,6 +2076,9 @@ def error_summary(message: str, **extra: object) -> int:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.read_handoff:
+        return read_handoff_section(args.read_handoff, args.section)
+
     timestamp = now_timestamp()
     workspace_lock_handle: Any | None = None
     workspace_lock_info: dict[str, Any] | None = None
@@ -2173,6 +2343,8 @@ def main(argv: list[str]) -> int:
         review_performed = step_review_performed or final_review_performed
         fixup_rounds_used = max(0, len(attempt_history) - 1)
         handoff_path = log_dir / "handoff.json"
+        summary_path = log_dir / "summary.json"
+        brief_path = log_dir / "orchestrator_brief.json"
         handoff_kind = "final_review"
         handoff_status = "passed" if review_ok else "needs_followup"
         handoff_summary = (
@@ -2306,9 +2478,19 @@ def main(argv: list[str]) -> int:
             executor_result_json = final_review_result
             summary["executor_result"] = executor_result_json
             summary["implementation_result"] = executor_result_json
+        orchestrator_brief = build_orchestrator_brief(summary, handoff, handoff_path, summary_path, brief_path)
+        summary["orchestrator_brief"] = orchestrator_brief
+        summary["orchestrator_brief_path"] = str(brief_path)
         write_text(handoff_path, json.dumps(handoff, indent=2, ensure_ascii=False))
-        write_text(log_dir / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
-        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        write_text(summary_path, json.dumps(summary, indent=2, ensure_ascii=False))
+        write_text(brief_path, json.dumps(orchestrator_brief, indent=2, ensure_ascii=False))
+        if request.stdout_mode == "brief":
+            stdout_payload = orchestrator_brief
+        elif request.stdout_mode == "summary":
+            stdout_payload = build_stdout_summary(summary)
+        else:
+            stdout_payload = summary
+        print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
         return 0 if summary["success"] else 1
 
     except Exception as exc:

@@ -19,7 +19,7 @@ The core rule is simple:
 
 **The orchestrator should decide the task boundary. The helper should own the execution loop.**
 
-Instead of asking a high-cost orchestrator to supervise every implementation and review step, this project lets Hermes launch one bounded helper run. The helper prepares a workspace, delegates implementation, runs tests where available, performs step review and fixup rounds, runs a final review, then writes machine-readable `summary.json` and `handoff.json` artifacts.
+Instead of asking a high-cost orchestrator to supervise every implementation and review step, this project lets Hermes launch one bounded helper run. The helper prepares a workspace, delegates implementation, runs tests where available, performs step review and fixup rounds, runs a final review, then prints a tiny orchestrator brief while writing full `summary.json` and `handoff.json` artifacts to disk.
 
 ## Why This Exists
 
@@ -33,7 +33,7 @@ Bounded Coding Delegation moves repeatable execution policy into a small determi
 | Model routing | Expensive reviewers can be called too often. | Flash-lite handles routine step review; pro is reserved for safe final review and high-risk escalation. |
 | Retry control | The orchestrator relaunches tasks manually. | The helper runs bounded internal fixup rounds. |
 | Process cleanup | Child CLIs can linger after timeout or interrupt. | The helper tracks active process groups and reaps them on timeout, interrupt, and shutdown. |
-| Handoff | The next agent scrapes prose. | The helper writes structured JSON with findings, review status, tests, and next action. |
+| Handoff | The next agent scrapes prose or reads a huge JSON blob. | The helper prints a tiny brief and exposes detailed sections on demand. |
 
 ## Execution Model
 
@@ -67,17 +67,43 @@ This keeps the common path quick without pretending every task deserves the same
 6. Run step review when the selected policy calls for it.
 7. Apply bounded fixup rounds when review finds actionable issues.
 8. Run final review according to the selected quality mode.
-9. Write logs, `summary.json`, and `handoff.json`.
+9. Write logs, `orchestrator_brief.json`, `summary.json`, and `handoff.json`.
 
-## Structured Handoff
+## Two-Tier Handoff
 
-Each run writes a `handoff.json` artifact under:
+Each run prints only a minimal stdout payload for the orchestrator:
 
-```text
-.hermes/delegate-runs/<timestamp>/handoff.json
+```json
+{
+  "success": true,
+  "handoff_status": "passed",
+  "followup_required": false,
+  "next_recommended_action": "Inspect the reported diff and logs, then ask before applying, committing, pushing, or deploying.",
+  "paths": {
+    "handoff": ".hermes/delegate-runs/<timestamp>/handoff.json",
+    "summary": ".hermes/delegate-runs/<timestamp>/summary.json",
+    "brief": ".hermes/delegate-runs/<timestamp>/orchestrator_brief.json"
+  }
+}
 ```
 
-The handoff includes:
+Full artifacts stay under:
+
+```text
+.hermes/delegate-runs/<timestamp>/
+```
+
+When the orchestrator needs details, it can read only the relevant section:
+
+```bash
+python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<timestamp>/handoff.json --section findings
+python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<timestamp>/handoff.json --section tests
+python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<timestamp>/handoff.json --section changed_files
+```
+
+Available sections are `brief`, `findings`, `tests`, `changed_files`, `attempts`, `logs`, and `full`.
+
+The full handoff includes:
 
 - task and workspace metadata
 - selected executor and model routing
@@ -89,7 +115,7 @@ The handoff includes:
 - `followup_required`
 - `next_recommended_action`
 
-Downstream orchestrators should read this object instead of scraping terminal prose.
+Downstream orchestrators should treat helper execution as stateless: launch the helper, drop transient executor/review logs from context, then wake up on the brief. Full JSON should be read only when the brief says a detail section is needed.
 
 ## Installation
 
@@ -121,6 +147,7 @@ Create a request JSON file:
   "mode": "implement",
   "quality_mode": "auto",
   "review": "auto",
+  "stdout_mode": "brief",
   "workspace_mode": "direct"
 }
 ```
@@ -131,6 +158,8 @@ Run the helper:
 python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.json
 ```
 
+By default, stdout is the compact orchestrator brief. `stdout_mode: "summary"` prints a compact run summary without the full handoff or executor payload; `stdout_mode: "full"` preserves the old verbose stdout behavior for debugging only.
+
 Useful modes:
 
 | Field | Values |
@@ -140,6 +169,7 @@ Useful modes:
 | `quality_mode` | `auto`, `fast`, `safe` |
 | `workspace_mode` | `direct`, `worktree`, `copy` |
 | `review` | `auto`, `always`, `never` |
+| `stdout_mode` | `brief`, `summary`, `full` |
 
 ## Safety Boundaries
 
@@ -158,6 +188,7 @@ The helper is intentionally conservative:
 .
 ├── SKILL.md
 ├── README.md
+├── README_CN.md
 ├── LICENSE
 └── scripts
     └── delegate_coding_cli.py

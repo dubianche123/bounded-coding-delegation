@@ -1,7 +1,7 @@
 ---
 name: delegate-coding-cli
 description: Delegate coding tasks from Hermes or Feishu webhook messages to local Codex CLI and Gemini CLI with direct, worktree, or copy workspace modes, model selection, safe execution, diff collection, and test reporting. Use for implementation, debugging, refactoring, code review, repository analysis, and multi-step coding tasks.
-version: 1.6.0
+version: 1.7.0
 platforms: [linux, macos]
 metadata:
   hermes:
@@ -33,6 +33,7 @@ Hard rules:
 - Final review failures must be reported in a structured format with `Target File`, `Line Number`, `Error Classification`, and `Required Fix Action`.
 - Default review policy is mode-dependent: `safe` defaults to `always`; `fast` defaults to `auto`.
 - Implementation runs may perform bounded internal fixup rounds (`max_fixup_rounds`) inside a single helper invocation; Hermes should not re-launch the skill after every step review unless the final handoff says `followup_required: true`.
+- Default stdout is a tiny `orchestrator_brief` only. Full `summary.json` and `handoff.json` stay on disk; Hermes must fetch details with `--read-handoff ... --section ...` only when needed.
 
 Do not use this skill for:
 - Direct deployment to production.
@@ -53,6 +54,7 @@ Do not use this skill for:
 - Default Gemini step-review model: `gemini-3.1-flash-lite-preview`.
 - Default Gemini final-review model: `gemini-3.1-pro-preview`.
 - Review cadence is helper-driven: flash-lite runs first for step review, safe mode always finishes final review with pro, and fast mode lets final review escalate only when the helper decides the task or findings warrant it.
+- Orchestrator context is stateless around helper runs: after launching the helper, do not keep executor/review logs in memory. When the helper exits, consume only the stdout brief unless a detail section is required.
 - Use `--check-health` when you want a quick process-count and workspace-lock snapshot without delegating any coding work.
 - Workspace modes:
   - `direct`: run the executor directly in the user repo, with pre/post git logs, no worktree, and no tmp copy.
@@ -94,32 +96,27 @@ Do not use this skill for:
 
 5. **Review cadence**: Flash-lite is the first-pass reviewer for step review. Safe mode keeps step reviews on by default and finishes the final review with pro. Fast mode keeps step review rare and lets the final review auto-escalate only when needed.
 
-6. **Structured handoff**: The helper writes both `summary.json` and `handoff.json`. Downstream orchestrators should read the nested `handoff` object, especially `handoff_kind`, `handoff_status`, and `handoff.metadata`, instead of scraping prose.
+6. **Two-tier structured handoff**: The helper writes `orchestrator_brief.json`, `summary.json`, and `handoff.json`. Downstream orchestrators should read the stdout brief first. Do not load full `handoff.json` unless the brief says details are required.
 
-   Expected shape:
+   Expected stdout shape:
    ```json
    {
-     "handoff_version": 1,
-     "handoff_kind": "step_review",
+     "success": true,
      "handoff_status": "passed",
-     "summary": "...",
-     "metadata": {
-       "quality_mode": "safe",
-       "review_findings": [],
-       "followup_required": false,
-       "next_recommended_action": "...",
-       "cleanup_log": [],
-       "review_model_used": "gemini-3.1-flash-lite-preview",
-       "review_tier": "flash_lite",
-       "workspace_lock": {
-         "lock_path": "...",
-         "pid": 12345,
-         "timestamp": "20260504-120000"
-       },
-       "handoff_path": "..."
-     }
+     "followup_required": false,
+     "next_recommended_action": "...",
+     "paths": {
+       "handoff": ".../handoff.json",
+       "summary": ".../summary.json",
+       "brief": ".../orchestrator_brief.json"
+     },
+     "available_sections": ["brief", "findings", "tests", "changed_files", "attempts", "logs", "full"]
    }
    ```
+
+   Detail retrieval examples:
+   `python3 -B scripts/delegate_coding_cli.py --read-handoff <handoff_path> --section findings`
+   `python3 -B scripts/delegate_coding_cli.py --read-handoff <handoff_path> --section tests`
 
 ## Procedure
 
@@ -176,7 +173,8 @@ Do not use this skill for:
      - CMake/C++: detect existing build instructions; do not invent destructive build steps.
    - The helper may re-run implementation internally for bounded fixup rounds before producing the final handoff.
    - Final review is direct pro in safe mode; fast mode uses flash-lite first and escalates to pro only when the helper decides the review is high-risk or ambiguous.
-   - Downstream orchestration should read `handoff.metadata.followup_required` instead of assuming every review failure needs a brand-new Hermes pass.
+   - Downstream orchestration should read stdout `followup_required` and `next_recommended_action` first. Only use `--read-handoff <handoff_path> --section findings` when it needs actionable details.
+   - Treat helper execution as stateless: do not preserve implementation/review logs in orchestrator context while the helper runs.
 
 7. Report to user:
    - Do not hide failures.
@@ -210,6 +208,16 @@ Do not use this skill for:
 
 9. **Manual patch beats re-delegate for small post-review fixes**: When the final review exits with `needs_followup` and the finding is a single targeted fix (restore one line, change one value, add one guard), use `read_file` + `patch` directly instead of launching another delegate round. The delegate overhead (gemini startup, prompt construction, review cycle) is 3-10 minutes for what may be a 30-second edit. Only re-delegate when the fix requires understanding broader context or touching multiple interrelated functions.
 
+10. **Exit code 1 ≠ failure**: The delegate script may exit with code 1 when the final review has `handoff_status: "needs_followup"` — this means the review found issues, not that the process crashed. Always check `handoff.json` for `handoff_status` before assuming failure. A `"passed"` status with exit code 0 is clean; `"needs_followup"` with exit code 1 means targeted fixes are needed.
+
+11. **Reading handoff review feedback quickly**: The `handoff.json` file can be large (200+ lines). To extract review findings without reading the whole file, use: `grep "review_feedback\|review_findings\|error_classification" <handoff_path> | head -10`. This gives the actionable items in seconds. For structured extraction, `python3 -c "import json; ..."` works but may be blocked by security — grep is more reliable.
+
+12. **Batch multi-feature enhancements into one run**: When the user lists 3-6 improvements at once (e.g., "fix bug A, add feature B, improve C"), write a single request JSON with all items as numbered sections. The delegate handles multi-point tasks well — splitting into separate runs wastes startup/review overhead per run. Group related changes; only split when changes are truly independent and each is 500+ lines.
+
+13. **Overly-broad guard clauses in shared functions**: When fixing "X blocks Y" bugs, the implementation often adds a blanket guard clause to the shared function instead of scoping it to the specific caller. Real-world example: `closeModal()` got `if (pending) return` to block closing the enemy-attack modal, but this blocked ALL modals (build, upgrade, events). The correct fix was `if (pending && modalContent.includes('敌军来袭')) return` — scoped to the specific modal type. **Mitigation**: in the task description, explicitly say "only block when [specific condition], other callers must be unaffected." When reviewing guard-clause fixes, check whether the condition is specific enough to not collateral-damage other code paths.
+
+14. **Counter-increment before derived calculation**: When a counter (wave number, turn, level) is incremented before computing a derived value (interval, reward, difficulty), the derived value is off by one. Real-world example: `wave++` then `interval = 5 + wave` gave interval 7 instead of 6 for wave 1. **Mitigation**: in task descriptions, specify whether the counter should be incremented before or after the derived calculation, or say "use the pre-increment value for the formula." When reviewing, look for `++` / `+= 1` immediately before a formula that references the same variable.
+
 ## Verification
 
 A successful run should produce:
@@ -227,6 +235,8 @@ When a Feishu webhook message asks for coding work, Hermes should normalize the 
 python3 -B ~/.hermes/skills/devops/delegate-coding-cli/scripts/delegate_coding_cli.py \
   --request-json /tmp/hermes-feishu-request.json
 ```
+
+By default, this command prints only the minimal orchestrator brief. Full artifacts are written under `.hermes/delegate-runs/<timestamp>/`.
 
 Supported request JSON fields:
 
@@ -246,6 +256,7 @@ Supported request JSON fields:
      "review_model": "gemini-3.1-flash-lite-preview",
      "final_review_model": "gemini-3.1-pro-preview",
      "review": "always",
+     "stdout_mode": "brief",
      "check_health": false,
      "workspace": "/tmp/hermes-coding-worktrees/custom-task-worktree"
    }
@@ -263,6 +274,7 @@ Field defaults:
 - `review_model`: `gemini-3.1-flash-lite-preview` default step-review model
 - `final_review_model`: `gemini-3.1-pro-preview` default final-review model
 - `review`: defaults to `always` in safe mode and `auto` in fast mode; explicit values still override the helper default.
+- `stdout_mode`: `brief` by default. `summary` prints a compact run summary without full handoff/executor payloads. `full` preserves the legacy verbose stdout and should be used only for debugging; normal Hermes orchestration should stay on `brief`.
 - `max_fixup_rounds`: defaults to `2` in safe mode and `0` in fast mode; the helper can retry implementation internally up to this many times when step review finds fixable issues.
 - `check_health`: default `false`; when `true`, the helper prints a process and workspace-lock snapshot and exits without delegating work.
 - `workspace_mode`: `direct` uses the repo path itself; `worktree` and `copy` use an isolated workspace path. If `workspace` is omitted, the helper chooses its default isolated path when needed.

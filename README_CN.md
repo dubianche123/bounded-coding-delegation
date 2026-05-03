@@ -19,7 +19,7 @@ Bounded Coding Delegation 是一个 Hermes skill 和 Python helper，用来把�
 
 **Orchestrator 负责决定任务边界，helper 负责执行循环。**
 
-与其让高成本的 orchestrator 逐步监督每一次实现和 review，不如让 Hermes 一次性启动一个有边界的 helper run。helper 会准备 workspace、执行实现、在可行时运行测试、做 step review 和 fixup 轮次、跑 final review，最后输出机器可读的 `summary.json` 和 `handoff.json`。
+与其让高成本的 orchestrator 逐步监督每一次实现和 review，不如让 Hermes 一次性启动一个有边界的 helper run。helper 会准备 workspace、执行实现、在可行时运行测试、做 step review 和 fixup 轮次、跑 final review，最后只向 stdout 输出很小的 orchestrator brief，并把完整的 `summary.json` 和 `handoff.json` 写到磁盘。
 
 ## 为什么要做这个
 
@@ -33,7 +33,7 @@ Bounded Coding Delegation 把可重复的执行策略下沉到一个小而确定
 | 模型路由 | 贵的 reviewer 容易被过度调用 | flash-lite 负责常规 step review，pro 留给 safe final review 和高风险升级 |
 | 重试控制 | orchestrator 手动反复拉起任务 | helper 内部执行有边界的 fixup 轮次 |
 | 进程清理 | 子 CLI 超时或中断后可能残留 | helper 跟踪进程组，并在超时、中断、退出时回收 |
-| 交接方式 | 下一位 agent 只能读自然语言 | helper 输出结构化 JSON，包含发现、review 状态、测试结果和下一步建议 |
+| 交接方式 | 下一位 agent 读自然语言或整份大 JSON | helper 只输出最小 brief，细节按 section 按需读取 |
 
 ## 执行模型
 
@@ -67,17 +67,43 @@ orchestrator 仍然重要，但它主要负责选择 repo、任务、模式和�
 6. 按策略执行 step review。
 7. 在 review 发现可修复问题时，执行有边界的 fixup 轮次。
 8. 根据质量模式执行 final review。
-9. 写入日志、`summary.json` 和 `handoff.json`。
+9. 写入日志、`orchestrator_brief.json`、`summary.json` 和 `handoff.json`。
 
-## 结构化交接
+## 两级交接
 
-每次运行都会在下面路径写入 `handoff.json`：
+每次运行默认只向 stdout 输出最小 payload：
 
-```text
-.hermes/delegate-runs/<timestamp>/handoff.json
+```json
+{
+  "success": true,
+  "handoff_status": "passed",
+  "followup_required": false,
+  "next_recommended_action": "Inspect the reported diff and logs, then ask before applying, committing, pushing, or deploying.",
+  "paths": {
+    "handoff": ".hermes/delegate-runs/<timestamp>/handoff.json",
+    "summary": ".hermes/delegate-runs/<timestamp>/summary.json",
+    "brief": ".hermes/delegate-runs/<timestamp>/orchestrator_brief.json"
+  }
+}
 ```
 
-handoff 包含：
+完整产物保存在：
+
+```text
+.hermes/delegate-runs/<timestamp>/
+```
+
+orchestrator 需要细节时，只读取对应 section：
+
+```bash
+python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<timestamp>/handoff.json --section findings
+python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<timestamp>/handoff.json --section tests
+python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<timestamp>/handoff.json --section changed_files
+```
+
+可用 section 包括 `brief`、`findings`、`tests`、`changed_files`、`attempts`、`logs` 和 `full`。
+
+完整 handoff 包含：
 
 - 任务与 workspace 元数据
 - 选用的 executor 和模型路由
@@ -89,7 +115,7 @@ handoff 包含：
 - `followup_required`
 - `next_recommended_action`
 
-下游 orchestrator 应该直接读取这个对象，而不是去抓终端里的自然语言。
+下游 orchestrator 应该把 helper 执行视为无状态过程：启动 helper 后丢掉临时执行日志上下文，等 helper 结束后只读取 brief。只有 brief 指向确实需要细节时，再按 section 读取完整 JSON 的局部内容。
 
 ## 安装
 
@@ -121,6 +147,7 @@ helper 需要：
   "mode": "implement",
   "quality_mode": "auto",
   "review": "auto",
+  "stdout_mode": "brief",
   "workspace_mode": "direct"
 }
 ```
@@ -131,6 +158,8 @@ helper 需要：
 python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.json
 ```
 
+默认 stdout 是压缩后的 orchestrator brief。`stdout_mode: "summary"` 会输出不包含完整 handoff 和 executor payload 的紧凑运行摘要；`stdout_mode: "full"` 保留旧版大 stdout 行为，仅建议调试时使用。
+
 常用字段：
 
 | 字段 | 取值 |
@@ -140,6 +169,7 @@ python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.j
 | `quality_mode` | `auto`, `fast`, `safe` |
 | `workspace_mode` | `direct`, `worktree`, `copy` |
 | `review` | `auto`, `always`, `never` |
+| `stdout_mode` | `brief`, `summary`, `full` |
 
 ## 安全边界
 
@@ -166,4 +196,3 @@ helper 会尽量保守地运行：
 ## 项目状态
 
 这是从 Hermes 工作流里抽出来的 MVP。目标不是替代高层 orchestrator，而是把执行层做得可控、可检查、可复用。
-
