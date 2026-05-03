@@ -1,6 +1,7 @@
 <div align="right">
   <sub>
-    <strong>English</strong>
+    <strong>English</strong> |
+    <a href="README_CN.md">中文</a>
   </sub>
 </div>
 
@@ -165,4 +166,3 @@ The helper is intentionally conservative:
 ## Project Status
 
 This is an MVP extracted from an active Hermes workflow. The goal is not to replace high-level orchestration, but to make the execution layer boring, bounded, and inspectable.
-
