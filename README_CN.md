@@ -7,77 +7,75 @@
 
 # Bounded Coding Delegation
 
-## 一个面向本地 AI 编码 CLI 的受控委派引擎
+Bounded Coding Delegation 是一个 Hermes skill 和本地 Python helper，用来把仓库内的编码任务委派给 Gemini CLI、Codex CLI 这类 AI 编码 CLI。
 
-**版本**：1.0 MVP  
-**作者**：Leo  
-**状态**：Hermes skill / 本地 CLI helper
-
-Bounded Coding Delegation 是一个 Hermes skill 和 Python helper，用来把仓库内的编码任务委派给 Gemini CLI、Codex CLI 这类本地编码工具。它专注处理 agentic coding 里最容易变乱的部分：进程清理、review 节奏、重试边界，以及返回给 orchestrator 的结构化交接。
-
-核心原则很简单：
+它围绕一个核心原则设计：
 
 **Orchestrator 负责决定任务边界，helper 负责执行循环。**
 
-与其让高成本的 orchestrator 逐步监督每一次实现和 review，不如让 Hermes 一次性启动一个有边界的 helper run。helper 会准备 workspace、执行实现、在可行时运行测试、做 step review 和 fixup 轮次、跑 final review，最后只向 stdout 输出很小的 orchestrator brief，并把完整的 `summary.json` 和 `handoff.json` 写到磁盘。
+也就是说，昂贵的父级 agent 不应该盯着每一次实现、测试、review、重试和清理。helper 在本地跑一个有边界的流程，写入结构化产物，并返回一个很小的 JSON brief，方便父级 orchestrator 低成本解析。
 
-## 为什么要做这个
+## 解决什么问题
 
-很多本地 agent 工作流会把 orchestrator 变成进程监督器。这既贵又脆弱。顶层 agent 要不断决定是否 review、是否重试、是否切更强的模型、子进程是不是还活着。会话一长，token 消耗会明显上升，进程泄漏也更难排查。
+本地 coding-agent 工作流经常栽在一些无聊但很痛的地方：
 
-Bounded Coding Delegation 把可重复的执行策略下沉到一个小而确定的 helper 里：
-
-| 问题 | 临时式委派 | Bounded Coding Delegation |
+| 问题 | 常见故障 | 这个 helper 的做法 |
 |:--|:--|:--|
-| Review 节奏 | orchestrator 一步一步决定 | `quality_mode` 每轮只解析一次，得到 `fast` 或 `safe` |
-| 模型路由 | 贵的 reviewer 容易被过度调用 | flash-lite 负责常规 step review，pro 留给 safe final review 和高风险升级 |
-| 重试控制 | orchestrator 手动反复拉起任务 | helper 内部执行有边界的 fixup 轮次 |
-| 进程清理 | 子 CLI 超时或中断后可能残留 | helper 跟踪进程组，并在超时、中断、退出时回收 |
-| 交接方式 | 下一位 agent 读自然语言或整份大 JSON | helper 只输出最小 brief，细节按 section 按需读取 |
+| 进程泄漏 | 子 CLI 在中断、超时或 pipe 卡住后残留 | 跟踪进程组，并在 timeout、shutdown、cleanup 时回收 |
+| token 膨胀 | orchestrator 读完整日志、review 输出和大 handoff JSON | stdout 只打印紧凑 brief，细节留在磁盘 |
+| 缺少可见性 | 长时间运行时终端看起来像卡死 | 把 progress heartbeat 写到 stderr，不污染 stdout JSON |
+| 弱模型循环 | fast/flash 模型反复修同一个 review 问题 | 到达 fixup 边界后停止，并向父级发出 `needs_escalation` |
+| review 策略临时化 | 每一步都让 orchestrator 重新判断 | `quality_mode` 每轮解析一次，然后执行确定性策略 |
 
-## 执行模型
+## 核心行为
 
-helper 把三种职责分开：
+helper 把职责拆开：
 
-- **实现**：默认使用 Gemini CLI 的 `gemini-3-flash-preview`，也可显式切换到 Codex CLI。
-- **step review**：默认使用 `gemini-3.1-flash-lite-preview`，用于常规检查和有边界的 fixup 决策。
-- **final review**：safe mode 下默认使用 `gemini-3.1-pro-preview`；fast mode 则先走轻量路径，只有 helper 判断风险足够高时才升级。
-
-orchestrator 仍然重要，但它主要负责选择 repo、任务、模式和质量策略。之后，helper 接管执行循环，直到返回结构化 handoff。
-
-## 质量模式
-
-`quality_mode` 决定 review 预算：
-
-| 模式 | 行为 |
-|:--|:--|
-| `auto` | helper 根据任务风险信号一次性判断为 `fast` 或 `safe` |
-| `fast` | 尽量减少 step review；final review 先走 flash-lite，只有风险足够时才升级 |
-| `safe` | 默认运行 step review，风险较高的 step review 可升级到 pro，final review 必定使用 pro |
-
-这样能保留常见路径的速度，同时避免把每个任务都当成同一个 review 预算来处理。
+- **实现**：默认使用 Gemini CLI 的 `gemini-3-flash-preview`；也可以显式选择 Codex CLI。
+- **step review**：默认使用 `gemini-3.1-flash-lite-preview`，用于常规检查和 fixup 决策。
+- **final review**：safe mode 使用 `gemini-3.1-pro-preview`；fast mode 先走轻量路径，只有风险足够时才升级。
+- **父级升级**：如果 fixup 次数耗尽但 review 仍失败，helper 不会自己升级模型，而是返回 `needs_escalation`，让 Hermes 用更强模型重新提交。
 
 ## 执行流程
 
-1. 校验仓库路径和 workspace 模式。
+1. 校验目标仓库和 workspace 模式。
 2. 创建或选择受控 workspace。
-3. 构建受限的 delegation prompt。
+3. 构建受限 delegation prompt。
 4. 通过 Gemini CLI 或 Codex CLI 执行实现。
-5. 在合理范围内运行测试。
+5. 在合理范围内运行检测到的测试。
 6. 按策略执行 step review。
 7. 在 review 发现可修复问题时，执行有边界的 fixup 轮次。
-8. 根据质量模式执行 final review。
-9. 写入日志、`orchestrator_brief.json`、`summary.json` 和 `handoff.json`。
+8. 如果 fixup 次数耗尽且 review 仍失败，返回 `needs_escalation`。
+9. 否则根据 `quality_mode` 执行 final review。
+10. 写入 `orchestrator_brief.json`、`summary.json`、`handoff.json` 和日志。
+11. 将最终 stdout payload 作为合法 JSON 打印出来。
+
+## Progress Heartbeat
+
+当 `stdout_mode` 是 `brief` 时，stdout 必须保持可机器解析。因此进度消息只写到 stderr：
+
+```text
+[Heartbeat] Starting Workspace: Preparing direct workspace for /path/to/repo.
+[Heartbeat] Generating Implementation: Round 1: running gemini implementation.
+[Heartbeat] Running Tests: Round 1: detecting and running configured tests.
+[Heartbeat] Step Review [1]: Running first-pass review with gemini-3.1-flash-lite-preview.
+[Heartbeat] Fixup Attempt [1]: Running targeted fixup with gemini.
+[Heartbeat] Final Review: Running final review in safe mode.
+[Heartbeat] Cleanup: Reaping active child processes after implementation run.
+```
+
+这样人和日志都能看到实时进度，同时 stdout 仍然只留给下游 JSON 解析。
 
 ## 两级交接
 
-每次运行默认只向 stdout 输出最小 payload：
+默认 stdout payload 很小：
 
 ```json
 {
   "success": true,
   "handoff_status": "passed",
   "followup_required": false,
+  "escalation_required": false,
   "next_recommended_action": "Inspect the reported diff and logs, then ask before applying, committing, pushing, or deploying.",
   "paths": {
     "handoff": ".hermes/delegate-runs/<timestamp>/handoff.json",
@@ -93,7 +91,7 @@ orchestrator 仍然重要，但它主要负责选择 repo、任务、模式和�
 .hermes/delegate-runs/<timestamp>/
 ```
 
-orchestrator 需要细节时，只读取对应 section：
+orchestrator 只读取自己需要的 section：
 
 ```bash
 python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<timestamp>/handoff.json --section findings
@@ -103,23 +101,33 @@ python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<
 
 可用 section 包括 `brief`、`findings`、`tests`、`changed_files`、`attempts`、`logs` 和 `full`。
 
-完整 handoff 包含：
+## Dynamic Escalation Signal
 
-- 任务与 workspace 元数据
-- 选用的 executor 和模型路由
-- 变更文件
-- 测试结果
-- step review 的反馈和 findings
-- final review 的反馈和 findings
-- cleanup log
-- `followup_required`
-- `next_recommended_action`
+helper 是有边界的。如果 step review 在 fixup 预算耗尽后仍然失败，helper 会停止并返回：
 
-下游 orchestrator 应该把 helper 执行视为无状态过程：启动 helper 后丢掉临时执行日志上下文，等 helper 结束后只读取 brief。只有 brief 指向确实需要细节时，再按 section 读取完整 JSON 的局部内容。
+```json
+{
+  "success": false,
+  "handoff_status": "needs_escalation",
+  "followup_required": true,
+  "escalation_required": true,
+  "next_recommended_action": "Task exceeded max fixup attempts with current executor. Recommend escalating to a stronger model (e.g., gemini-3.1-pro-preview) and resubmitting the task."
+}
+```
+
+具体触发原因会写入 `summary.json` 的 `error`、`escalation_reason` 和 `escalation_error`。helper 不在内部自动升级模型；这个判断属于父级 orchestrator。
+
+## 质量模式
+
+| 模式 | 行为 |
+|:--|:--|
+| `auto` | 根据任务风险信号一次性解析成 `fast` 或 `safe` |
+| `fast` | 尽量少做 step review；final review 先走 flash-lite，只有风险足够才调用 pro |
+| `safe` | 默认运行 step review，允许高风险 step review 找 pro 确认，并且 final review 默认使用 pro，除非 circuit breaker 先停止 |
 
 ## 安装
 
-先克隆仓库，再把 skill 安装到 Hermes 目录：
+克隆仓库后，把 skill 安装到 Hermes：
 
 ```bash
 mkdir -p ~/.hermes/skills/devops
@@ -127,17 +135,17 @@ cp -R . ~/.hermes/skills/devops/delegate-coding-cli
 chmod +x ~/.hermes/skills/devops/delegate-coding-cli/scripts/delegate_coding_cli.py
 ```
 
-helper 需要：
+依赖：
 
 - Python 3
 - Git
 - Gemini CLI 和/或 Codex CLI
 
-至少要有一个 executor 可用。
+至少需要一个 executor 可用。
 
 ## 使用
 
-先写一个 request JSON 文件：
+创建 request JSON：
 
 ```json
 {
@@ -152,15 +160,21 @@ helper 需要：
 }
 ```
 
-然后运行 helper：
+运行 helper：
 
 ```bash
 python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.json
 ```
 
-默认 stdout 是压缩后的 orchestrator brief。`stdout_mode: "summary"` 会输出不包含完整 handoff 和 executor payload 的紧凑运行摘要；`stdout_mode: "full"` 保留旧版大 stdout 行为，仅建议调试时使用。
+`stdout_mode` 只控制最终 stdout payload：
 
-常用字段：
+| 取值 | 输出 |
+|:--|:--|
+| `brief` | 最小 orchestrator JSON，默认且推荐 |
+| `summary` | 紧凑运行摘要，不包含完整 handoff 或 executor payload |
+| `full` | 旧版详细 summary，仅建议调试使用 |
+
+常用 request 字段：
 
 | 字段 | 取值 |
 |:--|:--|
@@ -169,23 +183,24 @@ python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.j
 | `quality_mode` | `auto`, `fast`, `safe` |
 | `workspace_mode` | `direct`, `worktree`, `copy` |
 | `review` | `auto`, `always`, `never` |
-| `stdout_mode` | `brief`, `summary`, `full` |
+| `max_fixup_rounds` | 非负整数 |
 
 ## 安全边界
 
-helper 会尽量保守地运行：
+helper 默认保守运行：
 
 - 拒绝过大或敏感的仓库路径。
 - 不 push、merge、deploy 或 publish。
 - 在调用子 CLI 前清理敏感环境变量。
 - prompt 先写入文件，再用 subprocess 调用，不拼 shell 字符串。
-- 用 workspace lock 避免两个 helper 同时改同一个 workspace。
-- 跟踪子进程组，并在超时或退出时清理。
+- 使用 workspace lock，避免两个 helper 同时改同一个 workspace。
+- 跟踪子进程组，并在 timeout、interrupt、shutdown 时清理。
 
 ## 仓库结构
 
 ```text
 .
+├── SKILL.md
 ├── README.md
 ├── README_CN.md
 ├── LICENSE
@@ -195,4 +210,4 @@ helper 会尽量保守地运行：
 
 ## 项目状态
 
-这是从 Hermes 工作流里抽出来的 MVP。目标不是替代高层 orchestrator，而是把执行层做得可控、可检查、可复用。
+这是从活跃 Hermes 工作流里抽出来的 MVP。目标不是替代高层 orchestrator，而是把本地执行层做得有边界、可观察、易交接。
