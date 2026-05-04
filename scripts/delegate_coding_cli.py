@@ -75,6 +75,10 @@ DEFAULT_WORKSPACE_MODE = "direct"
 DEFAULT_QUALITY_MODE = "auto"
 DEFAULT_STDOUT_MODE = "brief"
 HANDOFF_SECTIONS = ("brief", "findings", "tests", "changed_files", "attempts", "logs", "full")
+ESCALATION_RECOMMENDATION = (
+    "Task exceeded max fixup attempts with current executor. Recommend escalating to a stronger model "
+    "(e.g., gemini-3.1-pro-preview) and resubmitting the task."
+)
 
 ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 ACTIVE_PROCESSES_LOCK = threading.RLock()
@@ -132,6 +136,10 @@ def tail(text: str, limit: int = 4000) -> str:
     if len(text) <= limit:
         return text
     return text[-limit:]
+
+
+def emit_heartbeat(step_name: str, message: str) -> None:
+    print(f"[Heartbeat] {step_name}: {message}", file=sys.stderr, flush=True)
 
 
 def _decode_stream(value: str | bytes | None) -> str:
@@ -1400,6 +1408,10 @@ def run_implementation_round(
     prompt_path = log_dir / ("delegate_prompt.md" if round_index == 1 else f"delegate_prompt_round_{round_index}.md")
     write_text(prompt_path, prompt)
 
+    if round_index == 1:
+        emit_heartbeat("Generating Implementation", f"Round {round_index}: running {executor} implementation.")
+    else:
+        emit_heartbeat(f"Fixup Attempt [{round_index - 1}]", f"Running targeted fixup with {executor}.")
     executor_result, last_message_path, executor_warnings = run_executor(
         executor,
         request.mode,
@@ -1417,6 +1429,8 @@ def run_implementation_round(
     write_text(implementation_stdout_path, executor_result.stdout)
     write_text(implementation_stderr_path, executor_result.stderr)
 
+    if request.mode == "implement":
+        emit_heartbeat("Running Tests", f"Round {round_index}: detecting and running configured tests.")
     tests = run_detected_tests(workspace, timeout) if request.mode == "implement" else []
     tests_path = log_dir / ("tests.json" if round_index == 1 else f"tests_round_{round_index}.json")
     write_text(tests_path, json.dumps(tests, indent=2, ensure_ascii=False))
@@ -1450,6 +1464,7 @@ def run_implementation_round(
         review_prompt = build_review_prompt(task, workspace, changed_files, tests, "step", review_model)
         step_review_prompt_path = log_dir / ("gemini_review_prompt.txt" if round_index == 1 else f"gemini_review_prompt_round_{round_index}.txt")
         write_text(step_review_prompt_path, review_prompt)
+        emit_heartbeat(f"Step Review [{round_index}]", f"Running first-pass review with {review_model}.")
         gemini_review, _, review_warnings = run_executor(
             "gemini",
             "review",
@@ -1486,6 +1501,10 @@ def run_implementation_round(
         )
         if should_escalate:
             step_review_escalation_reason = escalation_reason
+            emit_heartbeat(
+                f"Step Review [{round_index}]",
+                f"Escalating review verification to {request.final_review_model}: {escalation_reason}.",
+            )
             step_policy_path = log_dir / (
                 "gemini_step_review.policy.md" if round_index == 1 else f"gemini_step_review_round_{round_index}.policy.md"
             )
@@ -1575,6 +1594,7 @@ def run_final_review_round(
     timeout: int,
     codex_model: str,
 ) -> dict[str, Any]:
+    emit_heartbeat("Final Review", f"Running final review in {request.quality_mode} mode.")
     final_policy_path = log_dir / "gemini_final_review.policy.md"
     write_text(final_policy_path, build_final_review_policy())
     if request.quality_mode == "safe":
@@ -1779,6 +1799,8 @@ def build_orchestrator_brief(
         "success": bool(success),
         "handoff_status": handoff.get("handoff_status"),
         "followup_required": bool(metadata.get("followup_required", summary.get("followup_required", False))),
+        "escalation_required": bool(metadata.get("escalation_required", summary.get("escalation_required", False))),
+        "error": metadata.get("escalation_error") or summary.get("error"),
         "next_recommended_action": metadata.get("next_recommended_action") or summary.get("next_recommended_action"),
         "summary": handoff.get("summary"),
         "counts": {
@@ -1814,6 +1836,8 @@ def build_stdout_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "review_policy": summary.get("review_policy"),
         "review_performed": summary.get("review_performed"),
         "followup_required": summary.get("followup_required"),
+        "escalation_required": summary.get("escalation_required"),
+        "error": summary.get("error"),
         "handoff_status": summary.get("handoff_status"),
         "models": summary.get("models"),
         "counts": counts,
@@ -1849,6 +1873,9 @@ def build_handoff_section(payload: dict[str, Any], section: str) -> dict[str, An
             "step_review_findings": metadata.get("step_review_findings", []),
             "review_feedback_excerpt": compact_review_feedback(metadata.get("review_feedback")),
             "step_review_feedback_excerpt": compact_review_feedback(metadata.get("step_review_feedback")),
+            "escalation_required": metadata.get("escalation_required"),
+            "escalation_reason": metadata.get("escalation_reason"),
+            "escalation_error": metadata.get("escalation_error"),
             "next_recommended_action": metadata.get("next_recommended_action"),
         }
     if section == "tests":
@@ -2084,6 +2111,7 @@ def main(argv: list[str]) -> int:
     workspace_lock_info: dict[str, Any] | None = None
     previous_signal_handlers: dict[int, Any] = {}
     cleanup_log: list[dict[str, Any]] = []
+    cleanup_heartbeat_emitted = False
 
     try:
         reset_runtime_state()
@@ -2117,6 +2145,7 @@ def main(argv: list[str]) -> int:
 
         executor = choose_executor(request.executor)
 
+        emit_heartbeat("Starting Workspace", f"Preparing {request.workspace_mode} workspace for {repo}.")
         workspace, branch, workspace_type, warnings, setup_results = create_workspace(
             repo,
             timestamp,
@@ -2152,6 +2181,9 @@ def main(argv: list[str]) -> int:
         executor_result_json: dict[str, Any] | None = None
         last_message_path: str | None = None
         attempt_history: list[dict[str, Any]] = []
+        escalation_required = False
+        escalation_reason: str | None = None
+        escalation_error: str | None = None
         primary_gemini_model = request.final_review_model if request.mode == "review" else request.gemini_model
         executor_selection_gemini_model = request.final_review_model if request.mode == "review" else request.gemini_model
 
@@ -2180,6 +2212,8 @@ def main(argv: list[str]) -> int:
             flash_final_review_findings = final_data.get("flash_review_findings") or []
             changed_files = collect_changed_files(workspace)
             post_state = capture_git_state(workspace, log_dir, "post", include_stat=True)
+            emit_heartbeat("Cleanup", "Reaping active child processes after review mode run.")
+            cleanup_heartbeat_emitted = True
             cleanup_active_processes("normal_exit")
             cleanup_log = list(CLEANUP_EVENTS)
             executor_result_json = final_review_result
@@ -2242,9 +2276,27 @@ def main(argv: list[str]) -> int:
                 last_message_path = attempt["last_message_path"]
                 if not attempt["review_performed"]:
                     break
-                if not attempt["step_review_has_findings"]:
+                if attempt["step_review_ok"]:
                     break
                 if round_index >= request.max_fixup_rounds + 1:
+                    model_name = request.codex_model if executor == "codex" else executor_selection_gemini_model
+                    finding_count = len(attempt.get("step_review_findings") or [])
+                    escalation_required = True
+                    escalation_reason = "max_fixup_attempts_exceeded"
+                    escalation_error = (
+                        "Task exceeded max fixup attempts with current executor while step review still failed. "
+                        f"executor={executor}; model={model_name}; max_fixup_rounds={request.max_fixup_rounds}; "
+                        f"attempts={len(attempt_history)}; last_step_review_model={attempt.get('step_review_model_used')}; "
+                        f"last_step_review_findings={finding_count}; "
+                        f"last_step_review_returncode={(attempt.get('step_review_result') or {}).get('returncode')}"
+                    )
+                    emit_heartbeat(
+                        f"Fixup Attempt [{max(round_index - 1, 0)}]",
+                        f"{escalation_error}; signaling parent orchestrator for escalation.",
+                    )
+                    warnings.append(escalation_error)
+                    break
+                if not attempt["step_review_has_findings"]:
                     break
 
             if attempt_history:
@@ -2280,29 +2332,34 @@ def main(argv: list[str]) -> int:
                         Path(final_attempt["step_review_stderr_path"]).read_text(encoding="utf-8"),
                     )
 
-            final_data = run_final_review_round(
-                request,
-                workspace,
-                log_dir,
-                task,
-                changed_files,
-                tests,
-                request.timeout,
-                request.codex_model,
-            )
-            warnings.extend(final_data["warnings"])
-            final_review_performed = True
-            final_review_result = final_data["review_result"]
-            final_review_feedback = final_data["review_feedback"] or ""
-            final_review_findings = final_data["review_findings"]
-            final_review_ok = final_data["review_ok"]
-            final_review_model_used = final_data.get("review_model_used")
-            final_review_tier = final_data.get("review_tier")
-            final_review_escalation_reason = final_data.get("escalation_reason")
-            flash_final_review_result = final_data.get("flash_review_result")
-            flash_final_review_feedback = final_data.get("flash_review_feedback") or ""
-            flash_final_review_findings = final_data.get("flash_review_findings") or []
+            if escalation_required:
+                emit_heartbeat("Final Review", "Skipped final review because the circuit breaker requested orchestrator escalation.")
+            else:
+                final_data = run_final_review_round(
+                    request,
+                    workspace,
+                    log_dir,
+                    task,
+                    changed_files,
+                    tests,
+                    request.timeout,
+                    request.codex_model,
+                )
+                warnings.extend(final_data["warnings"])
+                final_review_performed = True
+                final_review_result = final_data["review_result"]
+                final_review_feedback = final_data["review_feedback"] or ""
+                final_review_findings = final_data["review_findings"]
+                final_review_ok = final_data["review_ok"]
+                final_review_model_used = final_data.get("review_model_used")
+                final_review_tier = final_data.get("review_tier")
+                final_review_escalation_reason = final_data.get("escalation_reason")
+                flash_final_review_result = final_data.get("flash_review_result")
+                flash_final_review_feedback = final_data.get("flash_review_feedback") or ""
+                flash_final_review_findings = final_data.get("flash_review_findings") or []
             post_state = capture_git_state(workspace, log_dir, "post", include_stat=True)
+            emit_heartbeat("Cleanup", "Reaping active child processes after implementation run.")
+            cleanup_heartbeat_emitted = True
             cleanup_active_processes("normal_exit")
             cleanup_log = list(CLEANUP_EVENTS)
 
@@ -2332,12 +2389,12 @@ def main(argv: list[str]) -> int:
         if not final_review_feedback and step_review_feedback:
             final_review_feedback = step_review_feedback
             final_review_findings = step_review_findings
-        review_ok = final_review_ok if request.mode == "implement" else (
+        review_ok = False if escalation_required else final_review_ok if request.mode == "implement" else (
             final_review_result is None or (
                 final_review_result.get("returncode") == 0 and not review_has_findings(final_review_feedback)
             )
         )
-        followup_required = not review_ok
+        followup_required = escalation_required or not review_ok
         review_result = final_review_result
         review_feedback = final_review_feedback or None
         review_performed = step_review_performed or final_review_performed
@@ -2345,18 +2402,25 @@ def main(argv: list[str]) -> int:
         handoff_path = log_dir / "handoff.json"
         summary_path = log_dir / "summary.json"
         brief_path = log_dir / "orchestrator_brief.json"
-        handoff_kind = "final_review"
-        handoff_status = "passed" if review_ok else "needs_followup"
-        handoff_summary = (
-            f"Implementation complete after {len(attempt_history) or 1} implementation attempt(s); final review passed with PASS."
-            if review_ok
-            else f"Final review found {len(final_review_findings) or 1} issue(s); start a new delegate run with the structured handoff."
-        )
-        next_recommended_action = (
-            "Inspect the reported diff and logs, then ask before applying, committing, pushing, or deploying."
-            if review_ok
-            else f"Start a new delegate run with {handoff_path} as the structured handoff; do not chain an automatic fixup in the same run."
-        )
+        handoff_kind = "dynamic_escalation" if escalation_required else "final_review"
+        handoff_status = "needs_escalation" if escalation_required else "passed" if review_ok else "needs_followup"
+        if escalation_required:
+            handoff_summary = (
+                f"Task exceeded max fixup attempts with current executor after {len(attempt_history) or 1} attempt(s); "
+                "parent orchestrator should escalate to a stronger model."
+            )
+            next_recommended_action = ESCALATION_RECOMMENDATION
+        else:
+            handoff_summary = (
+                f"Implementation complete after {len(attempt_history) or 1} implementation attempt(s); final review passed with PASS."
+                if review_ok
+                else f"Final review found {len(final_review_findings) or 1} issue(s); start a new delegate run with the structured handoff."
+            )
+            next_recommended_action = (
+                "Inspect the reported diff and logs, then ask before applying, committing, pushing, or deploying."
+                if review_ok
+                else f"Start a new delegate run with {handoff_path} as the structured handoff; do not chain an automatic fixup in the same run."
+            )
         handoff = {
             "handoff_version": 1,
             "handoff_kind": handoff_kind,
@@ -2405,6 +2469,10 @@ def main(argv: list[str]) -> int:
                 "flash_review_findings": flash_final_review_findings,
                 "followup_required": followup_required,
                 "next_recommended_action": next_recommended_action,
+                "fail_fast": escalation_required,
+                "escalation_required": escalation_required,
+                "escalation_reason": escalation_reason,
+                "escalation_error": escalation_error,
                 "cleanup_log": cleanup_log,
                 "log_dir": str(log_dir),
                 "handoff_path": str(handoff_path),
@@ -2414,7 +2482,7 @@ def main(argv: list[str]) -> int:
             },
         }
         summary = {
-            "success": executor_result_json is not None and not tests_failed and review_ok,
+            "success": executor_result_json is not None and not tests_failed and review_ok and not escalation_required,
             "executor": executor,
             "mode": request.mode,
             "quality_mode": request.quality_mode,
@@ -2444,6 +2512,11 @@ def main(argv: list[str]) -> int:
             "flash_final_review_feedback": flash_final_review_feedback or None,
             "flash_final_review_findings": flash_final_review_findings,
             "followup_required": followup_required,
+            "fail_fast": escalation_required,
+            "escalation_required": escalation_required,
+            "escalation_reason": escalation_reason,
+            "escalation_error": escalation_error,
+            "error": escalation_error if escalation_required else None,
             "handoff_version": handoff["handoff_version"],
             "handoff_kind": handoff["handoff_kind"],
             "handoff_status": handoff["handoff_status"],
@@ -2497,6 +2570,9 @@ def main(argv: list[str]) -> int:
         return error_summary(str(exc))
     finally:
         if not cleanup_log:
+            if not cleanup_heartbeat_emitted:
+                emit_heartbeat("Cleanup", "Reaping active child processes and releasing workspace lock.")
+                cleanup_heartbeat_emitted = True
             cleanup_log.extend(cleanup_active_processes("shutdown"))
         release_workspace_lock(workspace_lock_handle)
         if previous_signal_handlers:
