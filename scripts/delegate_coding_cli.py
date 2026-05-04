@@ -1768,6 +1768,105 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def estimate_token_count(text: str) -> int:
+    if not text:
+        return 0
+    cjk_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    other_chars = max(len(text) - cjk_chars, 0)
+    return max(1, int((cjk_chars / 1.5) + (other_chars / 4.0) + 0.999))
+
+
+def estimate_file_tokens(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {
+        "path": str(path),
+        "chars": len(text),
+        "estimated_tokens": estimate_token_count(text),
+    }
+
+
+def collect_artifact_token_estimates(log_dir: Path) -> dict[str, Any]:
+    patterns = {
+        "implementation_prompts": ["delegate_prompt.md", "delegate_prompt_round_*.md"],
+        "implementation_outputs": ["implementation*.stdout.log", "implementation*.stderr.log"],
+        "test_results": ["tests.json", "tests_round_*.json"],
+        "step_review_prompts": ["gemini_review_prompt.txt", "gemini_review_prompt_round_*.txt"],
+        "step_review_outputs": [
+            "gemini_review.stdout.log",
+            "gemini_review.stderr.log",
+            "gemini_review_round_*.stdout.log",
+            "gemini_review_round_*.stderr.log",
+        ],
+        "step_review_pro_prompts": ["gemini_review_pro_prompt.txt", "gemini_review_pro_prompt_round_*.txt"],
+        "step_review_pro_outputs": [
+            "gemini_review_pro.stdout.log",
+            "gemini_review_pro.stderr.log",
+            "gemini_review_pro_round_*.stdout.log",
+            "gemini_review_pro_round_*.stderr.log",
+        ],
+        "final_flash_prompts": ["gemini_final_review_flash_prompt.txt"],
+        "final_flash_outputs": ["gemini_final_review_flash.stdout.log", "gemini_final_review_flash.stderr.log"],
+        "final_pro_prompts": ["gemini_final_review_prompt.txt", "gemini_final_review_pro_prompt.txt"],
+        "final_pro_outputs": ["gemini_final_review.stdout.log", "gemini_final_review.stderr.log"],
+    }
+    by_category: dict[str, Any] = {}
+    seen: set[Path] = set()
+    for category, category_patterns in patterns.items():
+        files: list[dict[str, Any]] = []
+        for pattern in category_patterns:
+            for path in sorted(log_dir.glob(pattern)):
+                if path in seen or not path.is_file():
+                    continue
+                seen.add(path)
+                files.append(estimate_file_tokens(path))
+        by_category[category] = {
+            "files": files,
+            "file_count": len(files),
+            "chars": sum(file["chars"] for file in files),
+            "estimated_tokens": sum(file["estimated_tokens"] for file in files),
+        }
+    return {
+        "by_category": by_category,
+        "total_chars": sum(category["chars"] for category in by_category.values()),
+        "total_estimated_tokens": sum(category["estimated_tokens"] for category in by_category.values()),
+    }
+
+
+def build_token_efficiency_metrics(
+    summary: dict[str, Any],
+    handoff: dict[str, Any],
+    orchestrator_brief: dict[str, Any],
+    log_dir: Path,
+    stdout_mode: str,
+) -> dict[str, Any]:
+    brief_text = json.dumps(orchestrator_brief, ensure_ascii=False)
+    summary_text = json.dumps(summary, ensure_ascii=False)
+    handoff_text = json.dumps(handoff, ensure_ascii=False)
+    brief_tokens = estimate_token_count(brief_text)
+    summary_tokens = estimate_token_count(summary_text)
+    handoff_tokens = estimate_token_count(handoff_text)
+    saved_vs_summary = max(summary_tokens - brief_tokens, 0)
+    saved_vs_handoff = max(handoff_tokens - brief_tokens, 0)
+    return {
+        "estimation_method": "heuristic: CJK chars / 1.5 + other chars / 4; use provider billing for exact counts",
+        "computed_before_embedding_metrics": True,
+        "orchestrator_stdout": {
+            "stdout_mode": stdout_mode,
+            "brief_chars": len(brief_text),
+            "brief_estimated_tokens": brief_tokens,
+            "full_summary_chars": len(summary_text),
+            "full_summary_estimated_tokens": summary_tokens,
+            "handoff_chars": len(handoff_text),
+            "handoff_estimated_tokens": handoff_tokens,
+            "estimated_tokens_saved_vs_full_summary": saved_vs_summary,
+            "estimated_reduction_vs_full_summary": round(saved_vs_summary / summary_tokens, 4) if summary_tokens else 0,
+            "estimated_tokens_saved_vs_handoff": saved_vs_handoff,
+            "estimated_reduction_vs_handoff": round(saved_vs_handoff / handoff_tokens, 4) if handoff_tokens else 0,
+        },
+        "artifact_io": collect_artifact_token_estimates(log_dir),
+    }
+
+
 def compact_review_feedback(text: str | None, limit: int = 1200) -> str | None:
     if not text:
         return None
@@ -1857,6 +1956,7 @@ def build_stdout_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "handoff_status": summary.get("handoff_status"),
         "models": summary.get("models"),
         "counts": counts,
+        "token_efficiency": summary.get("token_efficiency", {}).get("orchestrator_stdout"),
         "tests_ran": summary.get("tests_ran"),
         "tests_success": summary.get("tests_success"),
         "attempt_count": summary.get("attempt_count"),
@@ -2571,6 +2671,16 @@ def main(argv: list[str]) -> int:
             summary["executor_result"] = executor_result_json
             summary["implementation_result"] = executor_result_json
         orchestrator_brief = build_orchestrator_brief(summary, handoff, handoff_path, summary_path, brief_path)
+        token_efficiency = build_token_efficiency_metrics(
+            summary,
+            handoff,
+            orchestrator_brief,
+            log_dir,
+            request.stdout_mode,
+        )
+        handoff["metadata"]["token_efficiency"] = token_efficiency
+        summary["token_efficiency"] = token_efficiency
+        orchestrator_brief["token_efficiency"] = token_efficiency["orchestrator_stdout"]
         summary["orchestrator_brief"] = orchestrator_brief
         summary["orchestrator_brief_path"] = str(brief_path)
         write_text(handoff_path, json.dumps(handoff, indent=2, ensure_ascii=False))

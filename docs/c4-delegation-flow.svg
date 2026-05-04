@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1480" height="980" viewBox="0 0 1480 980" role="img" aria-labelledby="title desc">
+  <title id="title">Bounded Coding Delegation C4 runtime flow</title>
+  <desc id="desc">A C4-style runtime architecture diagram showing an orchestrator delegating a bounded coding task to a deterministic Python helper, which calls local AI coding CLIs, writes artifacts, emits stderr heartbeats, and returns a compact stdout JSON brief.</desc>
+  <defs>
+    <marker id="arrow-black" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#111827"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <style>
+      .bg { fill: #fbfaf7; }
+      .cluster { fill: #ffffff; stroke: #d4d4d8; stroke-width: 2; }
+      .cluster-title { fill: #52525b; font: 700 20px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .cluster-sub { fill: #71717a; font: 400 15px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .node { fill: #ffffff; stroke: #18181b; stroke-width: 2.2; }
+      .node-helper { fill: #fff7ed; stroke: #b45309; stroke-width: 2.2; }
+      .node-artifact { fill: #f0fdf4; stroke: #15803d; stroke-width: 2.2; }
+      .node-model { fill: #fff1f2; stroke: #dc2626; stroke-width: 2.2; }
+      .node-heartbeat { fill: #eff6ff; stroke: #2563eb; stroke-width: 2.2; }
+      .title-text { fill: #111827; font: 800 34px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .title-detail { fill: #111827; font: 700 23px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .subtitle { fill: #52525b; font: 400 17px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .node-title { fill: #111827; font: 800 18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; text-anchor: middle; }
+      .node-body { fill: #3f3f46; font: 400 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; text-anchor: middle; }
+      .node-small { fill: #52525b; font: 400 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; text-anchor: middle; }
+      .line-black { fill: none; stroke: #111827; stroke-width: 3; marker-end: url(#arrow-black); }
+      .line-red { fill: none; stroke: #dc2626; stroke-width: 3; stroke-dasharray: 10 8; marker-end: url(#arrow-red); }
+      .line-blue { fill: none; stroke: #2563eb; stroke-width: 3; marker-end: url(#arrow-blue); }
+      .line-gray { fill: none; stroke: #71717a; stroke-width: 2.4; stroke-dasharray: 7 7; }
+      .label-bg { fill: #ffffff; stroke: #e4e4e7; stroke-width: 1; }
+      .line-label { fill: #18181b; font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; text-anchor: middle; }
+      .red-label { fill: #b91c1c; font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; text-anchor: middle; }
+      .blue-label { fill: #1d4ed8; font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; text-anchor: middle; }
+      .legend { fill: #3f3f46; font: 400 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .legend-strong { fill: #18181b; font: 800 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1480" height="980"/>
+
+  <text class="title-text" x="70" y="64">Bounded Coding Delegation</text>
+  <text class="title-detail" x="70" y="98">C4 runtime flow for bounded local AI coding delegation</text>
+  <text class="subtitle" x="70" y="130">Black lines are deterministic control and artifacts. Red dashed lines are model-backed CLI calls. Blue lines are stderr observability.</text>
+
+  <rect class="cluster" x="60" y="165" width="315" height="590" rx="18"/>
+  <text class="cluster-title" x="88" y="204">Parent Orchestrator</text>
+  <text class="cluster-sub" x="88" y="231">task boundary and follow-up decision</text>
+
+  <rect class="cluster" x="415" y="165" width="395" height="590" rx="18"/>
+  <text class="cluster-title" x="443" y="204">Deterministic Helper Boundary</text>
+  <text class="cluster-sub" x="443" y="231">bounded execution policy in Python</text>
+
+  <rect class="cluster" x="850" y="165" width="285" height="590" rx="18"/>
+  <text class="cluster-title" x="878" y="204">Local Workspace</text>
+  <text class="cluster-sub" x="878" y="231">repo state, logs, and handoff files</text>
+
+  <rect class="cluster" x="1175" y="165" width="245" height="590" rx="18"/>
+  <text class="cluster-title" x="1203" y="204">Model-Backed CLIs</text>
+  <text class="cluster-sub" x="1203" y="231">external coding and review tools</text>
+
+  <rect class="node" x="105" y="285" width="225" height="112" rx="14"/>
+  <text class="node-title" x="217.5" y="323">Hermes Skill</text>
+  <text class="node-body" x="217.5" y="350">or portable caller</text>
+  <text class="node-small" x="217.5" y="374">Codex CLI / Gemini CLI wrapper</text>
+
+  <rect class="node" x="105" y="525" width="225" height="112" rx="14"/>
+  <text class="node-title" x="217.5" y="563">Orchestrator Wake-Up</text>
+  <text class="node-body" x="217.5" y="590">reads compact JSON</text>
+  <text class="node-small" x="217.5" y="614">decides apply, retry, or escalate</text>
+
+  <rect class="node-helper" x="470" y="250" width="285" height="118" rx="16"/>
+  <text class="node-title" x="612.5" y="288">delegate_coding_cli.py</text>
+  <text class="node-body" x="612.5" y="316">normalizes request</text>
+  <text class="node-body" x="612.5" y="339">locks workspace</text>
+  <text class="node-small" x="612.5" y="360">resolves fast / safe policy</text>
+
+  <rect class="node-helper" x="470" y="420" width="285" height="146" rx="16"/>
+  <text class="node-title" x="612.5" y="458">Bounded Execution Loop</text>
+  <text class="node-body" x="612.5" y="486">implementation</text>
+  <text class="node-body" x="612.5" y="509">tests</text>
+  <text class="node-body" x="612.5" y="532">step review + fixup</text>
+  <text class="node-small" x="612.5" y="553">circuit breaker: needs_escalation</text>
+
+  <rect class="node-heartbeat" x="470" y="615" width="285" height="92" rx="14"/>
+  <text class="node-title" x="612.5" y="652">Progress Heartbeat</text>
+  <text class="node-body" x="612.5" y="678">stderr only</text>
+  <text class="node-small" x="612.5" y="698">stdout stays valid JSON</text>
+
+  <rect class="node" x="888" y="250" width="210" height="100" rx="14"/>
+  <text class="node-title" x="993" y="288">Repo Workspace</text>
+  <text class="node-body" x="993" y="316">direct / worktree / copy</text>
+  <text class="node-small" x="993" y="337">git diff + tests</text>
+
+  <rect class="node-artifact" x="888" y="412" width="210" height="142" rx="14"/>
+  <text class="node-title" x="993" y="450">Run Artifacts</text>
+  <text class="node-body" x="993" y="478">stdout / stderr logs</text>
+  <text class="node-body" x="993" y="501">review outputs</text>
+  <text class="node-small" x="993" y="523">.hermes/delegate-runs</text>
+
+  <rect class="node-artifact" x="888" y="607" width="210" height="100" rx="14"/>
+  <text class="node-title" x="993" y="645">Two-Tier Handoff</text>
+  <text class="node-body" x="993" y="673">brief / summary / handoff</text>
+  <text class="node-small" x="993" y="694">details read on demand</text>
+
+  <rect class="node-model" x="1210" y="245" width="175" height="108" rx="14"/>
+  <text class="node-title" x="1297.5" y="281">Gemini Flash</text>
+  <text class="node-body" x="1297.5" y="309">implementation</text>
+  <text class="node-small" x="1297.5" y="332">gemini-3-flash</text>
+
+  <rect class="node-model" x="1210" y="414" width="175" height="108" rx="14"/>
+  <text class="node-title" x="1297.5" y="450">Flash-Lite</text>
+  <text class="node-body" x="1297.5" y="478">step / final review</text>
+  <text class="node-small" x="1297.5" y="501">cheap first pass</text>
+
+  <rect class="node-model" x="1210" y="585" width="175" height="108" rx="14"/>
+  <text class="node-title" x="1297.5" y="621">Gemini Pro</text>
+  <text class="node-body" x="1297.5" y="649">safe final review</text>
+  <text class="node-small" x="1297.5" y="672">explicit escalation only</text>
+
+  <path class="line-black" d="M 330 341 C 385 341 400 309 470 309"/>
+  <rect class="label-bg" x="339" y="303" width="136" height="26" rx="7"/>
+  <text class="line-label" x="407" y="321">request JSON</text>
+
+  <path class="line-black" d="M 755 309 C 810 309 825 300 888 300"/>
+  <rect class="label-bg" x="783" y="282" width="92" height="26" rx="7"/>
+  <text class="line-label" x="829" y="300">workspace</text>
+
+  <path class="line-red" d="M 755 468 C 940 310 1045 299 1210 299"/>
+  <rect class="label-bg" x="895" y="319" width="142" height="26" rx="7"/>
+  <text class="red-label" x="966" y="337">implementation</text>
+
+  <path class="line-red" d="M 755 500 C 930 476 1045 468 1210 468"/>
+  <rect class="label-bg" x="907" y="454" width="112" height="26" rx="7"/>
+  <text class="red-label" x="963" y="472">step review</text>
+
+  <path class="line-red" d="M 755 538 C 930 635 1045 639 1210 639"/>
+  <rect class="label-bg" x="895" y="611" width="148" height="26" rx="7"/>
+  <text class="red-label" x="969" y="629">pro confirmation</text>
+
+  <path class="line-black" d="M 755 505 C 810 505 825 483 888 483"/>
+  <rect class="label-bg" x="791" y="466" width="76" height="26" rx="7"/>
+  <text class="line-label" x="829" y="484">logs</text>
+
+  <path class="line-black" d="M 993 554 L 993 607"/>
+  <rect class="label-bg" x="938" y="571" width="110" height="26" rx="7"/>
+  <text class="line-label" x="993" y="589">structured</text>
+
+  <path class="line-blue" d="M 470 661 C 390 661 375 581 330 581"/>
+  <rect class="label-bg" x="337" y="642" width="122" height="26" rx="7"/>
+  <text class="blue-label" x="398" y="660">stderr heartbeat</text>
+
+  <path class="line-black" d="M 888 657 C 720 770 445 630 330 581"/>
+  <rect class="label-bg" x="536" y="692" width="150" height="26" rx="7"/>
+  <text class="line-label" x="611" y="710">stdout JSON brief</text>
+
+  <path class="line-gray" d="M 217.5 397 L 217.5 525"/>
+
+  <rect x="60" y="800" width="1360" height="120" rx="18" fill="#ffffff" stroke="#d4d4d8" stroke-width="2"/>
+  <line x1="96" y1="840" x2="176" y2="840" class="line-black"/>
+  <text class="legend-strong" x="198" y="846">Deterministic control</text>
+  <text class="legend" x="370" y="846">request parsing, workspace locks, retry limits, circuit breaker, and handoff JSON.</text>
+  <line x1="96" y1="874" x2="176" y2="874" class="line-red"/>
+  <text class="legend-strong" x="198" y="880">Model-backed work</text>
+  <text class="legend" x="370" y="880">Gemini/Codex CLI calls for implementation and review, bounded by helper policy.</text>
+  <line x1="96" y1="908" x2="176" y2="908" class="line-blue"/>
+  <text class="legend-strong" x="198" y="914">Observability</text>
+  <text class="legend" x="370" y="914">progress heartbeats on stderr; stdout remains parseable for the final orchestrator brief.</text>
+</svg>

@@ -15,6 +15,18 @@ Bounded Coding Delegation 是一个 Hermes skill 和本地 Python helper，用�
 
 也就是说，昂贵的父级 agent 不应该盯着每一次实现、测试、review、重试和清理。helper 在本地跑一个有边界的流程，写入结构化产物，并返回一个很小的 JSON brief，方便父级 orchestrator 低成本解析。
 
+## 运行时架构
+
+![Bounded Coding Delegation C4 运行时架构图](docs/c4-delegation-flow.svg)
+
+这张 C4 风格图把三层职责分开：
+
+- **父级 orchestrator**：定义任务边界，并在 helper 结束后决定 apply、retry 或 escalate。
+- **确定性 helper**：负责 workspace lock、模型路由、重试上限、heartbeat 和结构化 handoff。
+- **模型驱动 CLI**：负责实现和 review，但只能在 helper 的有界策略内运行。
+
+这个设计让 stdout 专门留给最终 JSON brief，stderr 专门放进度 heartbeat，详细日志则落盘，按需读取。
+
 ## 解决什么问题
 
 本地 coding-agent 工作流经常栽在一些无聊但很痛的地方：
@@ -130,6 +142,37 @@ python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<
 | `summary.json` | 完整运行摘要，包含模型路由和产物路径。 |
 | `handoff.json` | 用于 follow-up、escalation 或细节检查的结构化 handoff。 |
 
+## Token 效率指标
+
+每次完成的 run 都会在 `token_efficiency` 里记录启发式 token 估算：
+
+```json
+{
+  "token_efficiency": {
+    "orchestrator_stdout": {
+      "brief_estimated_tokens": 320,
+      "full_summary_estimated_tokens": 7800,
+      "estimated_tokens_saved_vs_full_summary": 7480,
+      "estimated_reduction_vs_full_summary": 0.959
+    },
+    "artifact_io": {
+      "by_category": {
+        "implementation_prompts": { "estimated_tokens": 1800 },
+        "step_review_outputs": { "estimated_tokens": 420 },
+        "final_pro_outputs": { "estimated_tokens": 260 }
+      }
+    }
+  }
+}
+```
+
+这些数字是估算，不是供应商账单。估算规则是：中文字符除以 1.5，其它字符除以 4。它主要回答两个实际问题：
+
+- compact stdout 相比读取完整 summary 或 handoff，到底给 orchestrator 省了多少上下文？
+- 哪个阶段制造了最多 prompt/output 体积：implementation、flash-lite review，还是 pro review？
+
+精确模型成本仍然要看供应商 usage 或 billing log。路由决策上，可以先用这些估算做预警：如果某类任务几乎不省，下一次 Hermes 就应该直接处理。
+
 ## Dynamic Escalation Signal
 
 helper 是有边界的。如果 step review 在 fixup 预算耗尽后仍然失败，helper 会停止并返回：
@@ -153,6 +196,16 @@ helper 是有边界的。如果 step review 在 fixup 预算耗尽后仍然失�
 | `auto` | 根据任务风险信号一次性解析成 `fast` 或 `safe` |
 | `fast` | 尽量少做 step review；final review 先走 flash-lite，只有风险足够才调用 pro |
 | `safe` | 默认运行 step review，允许高风险 step review 找 pro 确认，并且 final review 默认使用 pro，除非 circuit breaker 先停止 |
+
+## 委派边界
+
+delegation 不是免费的。只有当实现和 review 节省下来的上下文，大于 orchestrator 调度开销时，helper 才真正划算。
+
+一行修改、小 README 调整、git/admin 操作、问答解释，以及大概率只改 1-2 个文件且少于约 50 行的 targeted fix，优先让 Hermes 直接处理。
+
+预计 3 个以上文件、约 100 行以上变更/生成、需要测试循环、广泛调试、跨文件重构、大型 code review，或用户明确要求运行 bounded Gemini/Codex helper 时，才优先 delegation。
+
+中等任务用 `quality_mode: fast`，让 pro 尽量少出现。只有 final pro review 确实值得付费时，才用 `quality_mode: safe`。
 
 ## 安装
 
@@ -214,6 +267,24 @@ python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.j
 | `review` | `auto`, `always`, `never` |
 | `max_fixup_rounds` | 非负整数 |
 
+## 可平移性
+
+核心 helper 可以平移给 Codex CLI 或 Gemini CLI 使用，因为它本质上只是一个接收 request JSON、输出机器可读产物的 Python 入口。调用方只需要创建 request 文件，然后运行：
+
+```bash
+python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.json
+```
+
+Hermes 特有的是 skill 包装层，以及“什么时候应该调用它”的指令风格。要给另一个 CLI 使用同一套设计，只需要补一个很薄的 wrapper prompt 或命令约定：
+
+- 写入 request JSON；
+- 启动 `delegate_coding_cli.py`；
+- 把 stdout 当作 compact brief 读取；
+- 只有需要细节时再读取 `handoff.json` 的 section；
+- 当父级 CLI 和 executor CLI 是同一个工具时，避免递归委派循环。
+
+所以实践上，Codex CLI 或 Gemini CLI 现在就可以把它当作本地 helper 调用。要把它变成另一个 agent 环境的一等 skill，主要是重写包装指令，而不是重写 Python 执行引擎。
+
 ## 安全边界
 
 helper 默认保守运行：
@@ -233,6 +304,8 @@ helper 默认保守运行：
 ├── README.md
 ├── README_CN.md
 ├── LICENSE
+├── docs
+│   └── c4-delegation-flow.svg
 └── scripts
     └── delegate_coding_cli.py
 ```

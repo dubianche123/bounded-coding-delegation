@@ -15,6 +15,18 @@ It is built around one principle:
 
 That means the expensive parent agent should not babysit every implementation, test, review, retry, and cleanup step. The helper runs a bounded local workflow, writes structured artifacts, and returns a tiny JSON brief that the parent orchestrator can parse cheaply.
 
+## Runtime Architecture
+
+![Bounded Coding Delegation C4 runtime flow](docs/c4-delegation-flow.svg)
+
+This C4-style diagram separates three responsibilities:
+
+- **Parent orchestrator**: defines the task boundary and later decides whether to apply, retry, or escalate.
+- **Deterministic helper**: owns workspace locking, model routing, retry limits, heartbeat emission, and structured handoff.
+- **Model-backed CLIs**: perform implementation and review calls, but only inside the helper's bounded policy.
+
+The design keeps stdout reserved for the final JSON brief, stderr reserved for progress heartbeats, and detailed logs on disk for selective inspection.
+
 ## What It Solves
 
 Local coding-agent workflows often fail in boring but painful places:
@@ -130,6 +142,37 @@ The final stdout brief includes the exact `paths.log_dir`, `paths.summary`, and 
 | `summary.json` | Full run summary, including model routing and artifact paths. |
 | `handoff.json` | Structured handoff for follow-up, escalation, or detailed inspection. |
 
+## Token Efficiency Metrics
+
+Every completed run records heuristic token estimates in `token_efficiency`:
+
+```json
+{
+  "token_efficiency": {
+    "orchestrator_stdout": {
+      "brief_estimated_tokens": 320,
+      "full_summary_estimated_tokens": 7800,
+      "estimated_tokens_saved_vs_full_summary": 7480,
+      "estimated_reduction_vs_full_summary": 0.959
+    },
+    "artifact_io": {
+      "by_category": {
+        "implementation_prompts": { "estimated_tokens": 1800 },
+        "step_review_outputs": { "estimated_tokens": 420 },
+        "final_pro_outputs": { "estimated_tokens": 260 }
+      }
+    }
+  }
+}
+```
+
+These numbers are estimates, not provider billing. They use a simple heuristic: CJK characters divided by 1.5 plus other characters divided by 4. They answer two practical questions:
+
+- Did compact stdout save orchestrator context compared with reading the full summary or handoff?
+- Which stage produced the most prompt/output volume: implementation, flash-lite review, or pro review?
+
+For exact model cost, compare these run artifacts with provider usage or billing logs. For routing decisions, use these estimates as the first warning light: if a task class saves little or nothing, Hermes should handle that class directly next time.
+
 ## Dynamic Escalation Signal
 
 The helper is deliberately bounded. If step review still fails after the configured fixup budget, the helper stops and returns:
@@ -153,6 +196,16 @@ The exact breaker reason is stored in `summary.json` as `error`, `escalation_rea
 | `auto` | Resolves once to `fast` or `safe` from task risk signals. |
 | `fast` | Keeps step review rare; final review starts with flash-lite and calls pro only when risk warrants it. |
 | `safe` | Runs step review by default, permits high-risk step review confirmation, and always finishes with pro final review unless the circuit breaker stops first. |
+
+## Delegation Boundary
+
+Delegation is not free. The helper is useful when the saved implementation/review context is larger than the orchestration overhead.
+
+Prefer direct Hermes handling for one-line edits, small README changes, git/admin tasks, questions, and targeted fixes likely to touch 1-2 files under roughly 50 lines.
+
+Prefer delegation for likely 3+ files, roughly 100+ changed/generated lines, nontrivial tests, broad debugging, cross-file refactors, substantial code review, or explicit requests to run the bounded Gemini/Codex helper.
+
+Use `quality_mode: fast` for medium work where pro should be rare. Use `quality_mode: safe` only when the final pro review is worth paying for.
 
 ## Installation
 
@@ -214,6 +267,24 @@ Useful request fields:
 | `review` | `auto`, `always`, `never` |
 | `max_fixup_rounds` | Non-negative integer |
 
+## Portability
+
+The core helper is portable to Codex CLI or Gemini CLI because it is just a Python entry point that accepts request JSON and writes machine-readable artifacts. A caller only needs to create a request file and run:
+
+```bash
+python3 -B scripts/delegate_coding_cli.py --request-json /tmp/delegate-request.json
+```
+
+What is Hermes-specific is the skill wrapper and the instruction style around when to invoke it. To use the same design from another CLI, add a small wrapper prompt or command convention that:
+
+- writes the request JSON;
+- launches `delegate_coding_cli.py`;
+- reads stdout as the compact brief;
+- reads `handoff.json` sections only when details are needed;
+- avoids recursive loops when the parent CLI and executor CLI are the same tool.
+
+In practice, Codex CLI or Gemini CLI can use this as a local helper today. Turning it into a first-class skill for another agent environment mostly means rewriting the wrapper instructions, not rewriting the Python execution engine.
+
 ## Safety Boundaries
 
 The helper is conservative by design:
@@ -233,6 +304,8 @@ The helper is conservative by design:
 ├── README.md
 ├── README_CN.md
 ├── LICENSE
+├── docs
+│   └── c4-delegation-flow.svg
 └── scripts
     └── delegate_coding_cli.py
 ```

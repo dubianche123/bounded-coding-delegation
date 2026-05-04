@@ -1,7 +1,7 @@
 ---
 name: delegate-coding-cli
 description: Delegate coding tasks from Hermes or Feishu webhook messages to local Codex CLI and Gemini CLI with direct, worktree, or copy workspace modes, model selection, safe execution, diff collection, and test reporting. Use for implementation, debugging, refactoring, code review, repository analysis, and multi-step coding tasks.
-version: 1.7.0
+version: 1.8.0
 platforms: [linux, macos]
 metadata:
   hermes:
@@ -14,10 +14,32 @@ metadata:
 
 ## When to Use
 
-Use this skill when the user wants Hermes to implement, debug, refactor, review, or inspect code by delegating the task to a local human-facing coding CLI such as Codex CLI or Gemini CLI.
+Use this skill only when delegation is likely to be cheaper, safer, or more reliable than Hermes doing the work directly. The expected benefit must come from bounded execution, local CLI context, repeated test/review loops, or avoiding a large Hermes/Mimo context.
+
+Prefer **Hermes direct handling** for:
+- one-line or tiny edits;
+- small documentation/README wording changes;
+- git operations, commits, pushes, repo setup, or release metadata;
+- answering questions, explaining code, or reading a small number of files;
+- targeted fixes likely to touch 1-2 files and under roughly 50 lines;
+- post-review fixes where the handoff names a single obvious patch.
+
+Use **delegate-coding-cli** for:
+- likely 3+ files or roughly 100+ changed/generated lines;
+- multi-step implementation with tests and review loops;
+- broad debugging where the executor needs to inspect a repository locally;
+- cross-file refactors or feature work with nontrivial interaction risk;
+- code review of a substantial diff;
+- tasks where a cheaper implementation model can do the bulk work and Hermes should only consume a compact handoff;
+- explicit user requests to delegate, run Gemini/Codex CLI, or use the bounded helper.
+
+Routing rule of thumb:
+- direct Hermes: trivial/small, no meaningful test loop, low context;
+- delegate `quality_mode: fast`: medium task, likely useful executor context, pro should be rare;
+- delegate `quality_mode: safe`: high-risk task, tests matter, or final pro review is worth the cost.
 
 Hard rules:
-- Hermes must not directly implement, edit, create, or rewrite user project files.
+- Once Hermes chooses this skill for a task, Hermes must not directly implement, edit, create, or rewrite user project files inside that delegated run.
 - Hermes may only prepare workspace inputs, invoke `delegate_coding_cli.py`, collect diffs/tests/logs, and report results.
 - Every executor call must go through `delegate_coding_cli.py`.
 - Default implementation executor: Gemini CLI with `gemini-3-flash-preview`.
@@ -34,6 +56,7 @@ Hard rules:
 - Default review policy is mode-dependent: `safe` defaults to `always`; `fast` defaults to `auto`.
 - Implementation runs may perform bounded internal fixup rounds (`max_fixup_rounds`) inside a single helper invocation; Hermes should not re-launch the skill after every step review unless the final handoff says `followup_required: true`.
 - Default stdout is a tiny `orchestrator_brief` only. Full `summary.json` and `handoff.json` stay on disk; Hermes must fetch details with `--read-handoff ... --section ...` only when needed.
+- Every completed helper run includes `token_efficiency` estimates in the stdout brief and `summary.json`. Use those metrics to verify whether compact handoff saved orchestrator context; do not rely on intuition.
 
 Do not use this skill for:
 - Direct deployment to production.
@@ -118,9 +141,16 @@ Do not use this skill for:
    `python3 -B scripts/delegate_coding_cli.py --read-handoff <handoff_path> --section findings`
    `python3 -B scripts/delegate_coding_cli.py --read-handoff <handoff_path> --section tests`
 
+7. **Token efficiency is measured, not guessed**: The stdout brief and `summary.json` include `token_efficiency.orchestrator_stdout`, which estimates brief tokens versus full summary/handoff tokens. `summary.json` also includes `token_efficiency.artifact_io.by_category`, which estimates prompt/output tokens by stage (`implementation_prompts`, `step_review_outputs`, `final_pro_outputs`, etc.). These are heuristic estimates; provider billing remains the source of truth. Use them to decide whether future similar tasks should be direct Hermes, `fast`, or `safe`.
+
 ## Procedure
 
-1. Parse the user request:
+1. Decide whether delegation is warranted:
+   - If the task is tiny, direct, or mostly git/docs/admin work, do it in Hermes without this skill.
+   - If the task is medium/large, cross-file, test-heavy, or benefits from cheaper executor loops, use this skill.
+   - If unsure, default to direct Hermes for small edits and `quality_mode: fast` for medium coding work; reserve `safe` for real risk.
+
+2. Parse the user request:
    - repo path
    - task
    - preferred executor: codex, gemini, auto
@@ -129,19 +159,19 @@ Do not use this skill for:
    - workspace mode: direct, worktree, copy
    - optional Codex model, Gemini model, review policy, and isolated workspace path
 
-2. Validate repo path:
+3. Validate repo path:
    - Must exist.
    - Must be a directory.
    - Prefer git repository.
    - If not a git repo and `direct` mode requested: `cd REPO && git init && git add -A && git commit -m "init"` first.
    - Refuse paths such as `/`, `$HOME`, `~/.ssh`, `~/.config`, `/etc`, `/usr`, `/var`, `/private`.
 
-3. Create safe workspace:
+4. Create safe workspace:
    - `direct`: use the user repo path as the executor workspace, and save pre/post git logs under `.hermes/delegate-runs/<timestamp>/`
    - `worktree`: create a new git worktree branch internally
    - `copy`: copy the project into an isolated temporary workspace
 
-4. Build delegate prompt:
+5. Build delegate prompt:
    Include:
    - Original user task.
    - Repo/workspace path.
@@ -151,7 +181,7 @@ Do not use this skill for:
    - "Do not push/deploy."
    - "At the end, summarize changed files and tests."
 
-5. Run executor:
+6. Run executor:
    - Codex implementation:
      `codex exec --cd WORKDIR --sandbox workspace-write --model CODEX_MODEL --ephemeral --output-last-message OUTFILE -`
    - Gemini analysis:
@@ -163,7 +193,7 @@ Do not use this skill for:
    - Gemini final review:
      `gemini --skip-trust --model GEMINI_FINAL_REVIEW_MODEL --prompt "Follow the task from stdin." --approval-mode=plan --policy FINAL_REVIEW_POLICY.md --output-format json`
 
-6. Collect results:
+7. Collect results:
    - `git status --short`
    - `git diff --stat`
    - `git diff -- . ':!*.lock'`
@@ -175,14 +205,15 @@ Do not use this skill for:
    - Final review is direct pro in safe mode; fast mode uses flash-lite first and escalates to pro only when the helper decides the review is high-risk or ambiguous.
    - Downstream orchestration should read stdout `followup_required` and `next_recommended_action` first. Only use `--read-handoff <handoff_path> --section findings` when it needs actionable details.
    - Treat helper execution as stateless: do not preserve implementation/review logs in orchestrator context while the helper runs.
+   - Read `token_efficiency.orchestrator_stdout` from the brief or summary. If the estimated saved tokens are small or negative for this task class, prefer direct Hermes next time.
 
-7. Report to user:
+8. Report to user:
    - Do not hide failures.
    - Include exact commands that failed.
    - Do not claim tests passed unless they actually passed.
    - Ask before commit/push/deploy.
 
-8. Post-task cleanup:
+9. Post-task cleanup:
    - The helper now cleans active child process groups on timeout, interrupt, and shutdown.
    - Read `cleanup_log` from `summary.json` / `handoff.json` when you need to verify what was reaped.
    - If the whole shell is already wedged and the helper cannot start, fall back to manual cleanup only then.
@@ -225,6 +256,7 @@ A successful run should produce:
 - A final CLI output file.
 - A diff summary.
 - A test report.
+- Token efficiency estimates in the stdout brief and `summary.json`.
 - No changes to the original main worktree unless direct mode was explicitly requested or the user explicitly asks to apply them.
 
 ## Feishu / Hermes Invocation
