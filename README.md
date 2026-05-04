@@ -101,6 +101,35 @@ python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<
 
 Available sections are `brief`, `findings`, `tests`, `changed_files`, `attempts`, `logs`, and `full`.
 
+## Run Artifacts
+
+Every helper run writes its intermediate files under:
+
+```text
+<workspace>/.hermes/delegate-runs/<timestamp>/
+```
+
+The final stdout brief includes the exact `paths.log_dir`, `paths.summary`, and `paths.handoff` values. The most useful files are:
+
+| File | Meaning |
+|:--|:--|
+| `delegate_prompt.md` | Initial implementation prompt sent to the executor. |
+| `delegate_prompt_round_N.md` | Fixup prompt for implementation round `N`. |
+| `implementation.stdout.log` / `implementation.stderr.log` | Latest implementation executor output. |
+| `implementation_round_N.stdout.log` / `implementation_round_N.stderr.log` | Implementation executor output for fixup round `N`. |
+| `tests.json` | Latest detected test results. |
+| `tests_round_N.json` | Test results for fixup round `N`. |
+| `gemini_review_prompt.txt` | Latest step review prompt. |
+| `gemini_review.stdout.log` / `gemini_review.stderr.log` | Latest step review output, normally from `gemini-3.1-flash-lite-preview`. |
+| `gemini_review_round_N.stdout.log` / `gemini_review_round_N.stderr.log` | Step review output for fixup round `N`. |
+| `gemini_review_pro.stdout.log` / `gemini_review_pro.stderr.log` | Pro confirmation output when a step review escalates. |
+| `gemini_review_pro_round_N.stdout.log` / `gemini_review_pro_round_N.stderr.log` | Pro confirmation output for fixup round `N`. |
+| `gemini_final_review_flash.stdout.log` / `gemini_final_review_flash.stderr.log` | Final flash-lite review output in fast mode. |
+| `gemini_final_review.stdout.log` / `gemini_final_review.stderr.log` | Final pro review output in safe mode, or when fast final review escalates. |
+| `orchestrator_brief.json` | The compact payload intended for the parent orchestrator. |
+| `summary.json` | Full run summary, including model routing and artifact paths. |
+| `handoff.json` | Structured handoff for follow-up, escalation, or detailed inspection. |
+
 ## Dynamic Escalation Signal
 
 The helper is deliberately bounded. If step review still fails after the configured fixup budget, the helper stops and returns:

@@ -101,6 +101,35 @@ python3 -B scripts/delegate_coding_cli.py --read-handoff .hermes/delegate-runs/<
 
 可用 section 包括 `brief`、`findings`、`tests`、`changed_files`、`attempts`、`logs` 和 `full`。
 
+## 运行产物
+
+每次 helper run 都会把中间文件写到：
+
+```text
+<workspace>/.hermes/delegate-runs/<timestamp>/
+```
+
+最终 stdout brief 里会包含准确的 `paths.log_dir`、`paths.summary` 和 `paths.handoff`。最常用的文件如下：
+
+| 文件 | 含义 |
+|:--|:--|
+| `delegate_prompt.md` | 发给 executor 的初始实现 prompt。 |
+| `delegate_prompt_round_N.md` | 第 `N` 轮 fixup 的实现 prompt。 |
+| `implementation.stdout.log` / `implementation.stderr.log` | 最新一轮 implementation executor 输出。 |
+| `implementation_round_N.stdout.log` / `implementation_round_N.stderr.log` | 第 `N` 轮 fixup 的 implementation executor 输出。 |
+| `tests.json` | 最新一轮检测到的测试结果。 |
+| `tests_round_N.json` | 第 `N` 轮 fixup 的测试结果。 |
+| `gemini_review_prompt.txt` | 最新 step review prompt。 |
+| `gemini_review.stdout.log` / `gemini_review.stderr.log` | 最新 step review 输出，通常来自 `gemini-3.1-flash-lite-preview`。 |
+| `gemini_review_round_N.stdout.log` / `gemini_review_round_N.stderr.log` | 第 `N` 轮 fixup 的 step review 输出。 |
+| `gemini_review_pro.stdout.log` / `gemini_review_pro.stderr.log` | step review 升级到 pro 确认时的输出。 |
+| `gemini_review_pro_round_N.stdout.log` / `gemini_review_pro_round_N.stderr.log` | 第 `N` 轮 fixup 的 step review pro 确认输出。 |
+| `gemini_final_review_flash.stdout.log` / `gemini_final_review_flash.stderr.log` | fast mode 下 final flash-lite review 的输出。 |
+| `gemini_final_review.stdout.log` / `gemini_final_review.stderr.log` | safe mode 的 final pro review 输出，或 fast final review 升级到 pro 后的输出。 |
+| `orchestrator_brief.json` | 给父级 orchestrator 消费的紧凑 payload。 |
+| `summary.json` | 完整运行摘要，包含模型路由和产物路径。 |
+| `handoff.json` | 用于 follow-up、escalation 或细节检查的结构化 handoff。 |
+
 ## Dynamic Escalation Signal
 
 helper 是有边界的。如果 step review 在 fixup 预算耗尽后仍然失败，helper 会停止并返回：

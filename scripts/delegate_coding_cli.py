@@ -426,6 +426,17 @@ QUALITY_RISK_WORDS = (
     "令牌",
 )
 
+LOW_SIGNAL_RISK_WORDS = (
+    "cache",
+    "state",
+    "refactor",
+    "rewrite",
+    "replace",
+    "optimi",
+    "缓存",
+    "状态",
+)
+
 QUALITY_CRITICAL_RISK_WORDS = (
     "security",
     "auth",
@@ -509,12 +520,16 @@ def task_has_risk_words(task: str) -> bool:
     critical_hits = sum(1 for word in QUALITY_CRITICAL_RISK_WORDS if word in lowered)
     if critical_hits >= 1:
         return True
-    matches = sum(1 for word in QUALITY_RISK_WORDS if word in lowered)
-    if matches >= 2:
+    high_signal_words = tuple(word for word in QUALITY_RISK_WORDS if word not in LOW_SIGNAL_RISK_WORDS)
+    high_signal_matches = sum(1 for word in high_signal_words if word in lowered)
+    if high_signal_matches >= 2:
         return True
-    if any(word in lowered for word in ("critical", "major", "high risk", "breaking change", "regression")) and matches >= 1:
+    low_signal_matches = sum(1 for word in LOW_SIGNAL_RISK_WORDS if word in lowered)
+    if low_signal_matches >= 3 and high_signal_matches >= 1:
         return True
-    if len(lowered.split()) >= 18 and matches >= 1:
+    if any(word in lowered for word in ("critical", "major", "high risk", "breaking change", "regression")) and (
+        high_signal_matches >= 1 or low_signal_matches >= 2
+    ):
         return True
     return False
 
@@ -1330,9 +1345,10 @@ def should_escalate_review_to_pro(
     if review_stage == "final" and quality_mode == "safe":
         return True, "safe mode final review always uses pro"
 
-    if review_findings_are_high_risk(review_findings):
+    high_risk_findings = review_findings_are_high_risk(review_findings)
+    if high_risk_findings and (tests_failed or task_has_risk_words(task)):
         return True, "flash-lite review surfaced high-risk findings"
-    if len(review_findings) >= 2:
+    if len(review_findings) >= 2 and tests_failed:
         return True, "flash-lite review surfaced multiple findings"
     if tests_failed and review_has_findings(review_feedback):
         return True, "tests failed and flash-lite review also found issues"
@@ -2381,6 +2397,9 @@ def main(argv: list[str]) -> int:
                 "step_review_prompt_path": attempt["step_review_prompt_path"],
                 "step_review_stdout_path": attempt["step_review_stdout_path"],
                 "step_review_stderr_path": attempt["step_review_stderr_path"],
+                "step_review_tier": attempt.get("step_review_tier"),
+                "step_review_model_used": attempt.get("step_review_model_used"),
+                "step_review_escalation_reason": attempt.get("step_review_escalation_reason"),
             }
             for attempt in attempt_history
         ]
