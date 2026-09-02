@@ -5,9 +5,9 @@
   </sub>
 </div>
 
-# Bounded Coding Delegation
+# Loop Warden
 
-Bounded Coding Delegation 是一个 Hermes skill 和本地 Python helper，用来把仓库内的编码任务委派给 Gemini CLI、Codex CLI 这类 AI 编码 CLI。
+Loop Warden 是一个 Hermes skill 和本地 Python helper，用来把仓库内的编码任务委派给 Gemini CLI、Codex CLI 这类 AI 编码 CLI。
 
 它围绕一个核心原则设计：
 
@@ -17,7 +17,7 @@ Bounded Coding Delegation 是一个 Hermes skill 和本地 Python helper，用�
 
 ## 运行时架构
 
-![Bounded Coding Delegation C4 运行时架构图](docs/c4-delegation-flow.svg)
+![Loop Warden C4 运行时架构图](docs/c4-delegation-flow.svg)
 
 这张 C4 风格图把三层职责分开：
 
